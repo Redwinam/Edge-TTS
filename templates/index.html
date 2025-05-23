@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Edge TTS 在线工具</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" />
+    <style>
+      body {
+        padding-top: 2rem;
+        background-color: #f8f9fa;
+      }
+      .container {
+        max-width: 800px;
+      }
+      .card {
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      }
+      .history-item {
+        border-bottom: 1px solid #eee;
+        padding: 10px 0;
+      }
+      .history-item:last-child {
+        border-bottom: none;
+      }
+      .voice-search {
+        margin-bottom: 10px;
+      }
+      .language-tabs {
+        margin-bottom: 15px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .language-tabs .nav-link {
+        padding: 5px 10px;
+        margin: 0 2px;
+        border-radius: 20px;
+        font-size: 14px;
+      }
+      .voice-list {
+        max-height: 200px;
+        overflow-y: auto;
+        padding: 10px;
+        border: 1px solid #dee2e6;
+        border-radius: 5px;
+      }
+      .voice-option {
+        padding: 5px;
+        margin-bottom: 3px;
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      .voice-option:hover {
+        background-color: #e9ecef;
+      }
+      .voice-option.selected {
+        background-color: #cfe2ff;
+      }
+      .voice-gender {
+        font-size: 0.8em;
+        color: #6c757d;
+        margin-left: 10px;
+      }
+      .tab-content {
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1 class="text-center mb-4">Edge TTS 在线语音合成</h1>
+
+      <div class="card mb-4">
+        <div class="card-body">
+          <form id="tts-form">
+            <div class="mb-3">
+              <label for="text" class="form-label">输入文本</label>
+              <textarea class="form-control" id="text" rows="5" placeholder="请输入要转换为语音的文本..."></textarea>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label">选择语音</label>
+              <input type="text" class="form-control voice-search" id="voice-search" placeholder="搜索语音..." />
+
+              <div class="language-tabs nav nav-pills" id="language-tabs">
+                <!-- 语言标签将通过JS动态生成 -->
+              </div>
+
+              <div class="tab-content" id="voice-tabs-content">
+                <!-- 语音选项将通过JS动态生成 -->
+              </div>
+
+              <input type="hidden" id="voice" name="voice" value="zh-CN-XiaoxiaoNeural" />
+              <div class="mt-2"><strong>当前选择：</strong> <span id="selected-voice-display">中国大陆 晓晓 (女)</span></div>
+            </div>
+
+            <div class="row mb-3">
+              <div class="col-md-4">
+                <label for="rate" class="form-label">语速调整</label>
+                <select class="form-select" id="rate">
+                  <option value="-50%">非常慢</option>
+                  <option value="-25%">较慢</option>
+                  <option value="+0%" selected>正常</option>
+                  <option value="+25%">较快</option>
+                  <option value="+50%">非常快</option>
+                </select>
+              </div>
+
+              <div class="col-md-4">
+                <label for="volume" class="form-label">音量调整</label>
+                <select class="form-select" id="volume">
+                  <option value="-50%">非常轻</option>
+                  <option value="-25%">较轻</option>
+                  <option value="+0%" selected>正常</option>
+                  <option value="+25%">较大</option>
+                  <option value="+50%">非常大</option>
+                </select>
+              </div>
+
+              <div class="col-md-4">
+                <label for="pitch" class="form-label">音调调整</label>
+                <select class="form-select" id="pitch">
+                  <option value="-50Hz">非常低</option>
+                  <option value="-25Hz">较低</option>
+                  <option value="+0Hz" selected>正常</option>
+                  <option value="+25Hz">较高</option>
+                  <option value="+50Hz">非常高</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="d-grid">
+              <button type="submit" class="btn btn-primary" id="generate-btn">生成语音</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="card mb-4 d-none" id="result-card">
+        <div class="card-body">
+          <h5 class="card-title">生成结果</h5>
+          <div class="mb-3">
+            <audio id="audio-player" controls class="w-100"></audio>
+          </div>
+          <div class="d-flex justify-content-between">
+            <button class="btn btn-success" id="download-btn">下载音频</button>
+            <button class="btn btn-secondary" id="save-btn">保存到历史</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">历史记录</h5>
+          <div id="history-list">
+            <p class="text-muted text-center" id="no-history">暂无历史记录</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        // 语言名称映射
+        const languageNames = {
+          zh: "中文",
+          ja: "日语",
+          en: "英语",
+          ko: "韩语",
+          fr: "法语",
+          de: "德语",
+          es: "西班牙语",
+          ru: "俄语",
+          it: "意大利语",
+          pt: "葡萄牙语",
+          ar: "阿拉伯语",
+          th: "泰语",
+          vi: "越南语",
+          id: "印尼语",
+          ms: "马来语",
+          tr: "土耳其语",
+          pl: "波兰语",
+          nl: "荷兰语",
+          hi: "印地语",
+          other: "其他语言",
+        };
+
+        let allVoices = {}; // 存储所有语音
+        let activeLanguage = "zh"; // 默认选中中文
+
+        // 加载语音列表
+        fetch("/get_voices")
+          .then((response) => response.json())
+          .then((voices) => {
+            allVoices = voices;
+            createLanguageTabs(voices);
+            updateVoiceOptions(activeLanguage);
+
+            // 设置默认选中的语音
+            if (voices.zh && voices.zh.length > 0) {
+              selectVoice(voices.zh[0]);
+            }
+          });
+
+        // 创建语言标签页
+        function createLanguageTabs(voices) {
+          const tabsContainer = document.getElementById("language-tabs");
+          tabsContainer.innerHTML = "";
+
+          Object.keys(voices)
+            .sort()
+            .forEach((langCode) => {
+              if (voices[langCode].length > 0) {
+                const tab = document.createElement("button");
+                tab.className = `nav-link ${langCode === activeLanguage ? "active" : ""}`;
+                tab.textContent = languageNames[langCode] || langCode;
+                tab.dataset.langCode = langCode;
+                tab.onclick = (e) => {
+                  e.preventDefault();
+                  document.querySelectorAll(".language-tabs .nav-link").forEach((t) => t.classList.remove("active"));
+                  tab.classList.add("active");
+                  activeLanguage = langCode;
+                  updateVoiceOptions(langCode);
+                };
+                tabsContainer.appendChild(tab);
+              }
+            });
+
+          // 添加搜索功能
+          document.getElementById("voice-search").addEventListener("input", function () {
+            filterVoices(this.value);
+          });
+        }
+
+        // 更新语音选项
+        function updateVoiceOptions(langCode) {
+          const voicesContainer = document.getElementById("voice-tabs-content");
+          voicesContainer.innerHTML = "";
+
+          if (!allVoices[langCode] || allVoices[langCode].length === 0) {
+            voicesContainer.innerHTML = '<div class="text-center text-muted py-3">该语言暂无可用语音</div>';
+            return;
+          }
+
+          const voices = allVoices[langCode];
+          const voiceList = document.createElement("div");
+          voiceList.className = "voice-list";
+
+          voices.forEach((voice) => {
+            const option = document.createElement("div");
+            option.className = "voice-option";
+            option.dataset.name = voice.name;
+            option.dataset.display = voice.displayName || `${voice.name} (${voice.gender})`;
+
+            let displayText = voice.displayName || voice.name;
+            if (!voice.displayName && voice.localName) {
+              displayText = `${voice.localName} (${voice.gender === "Female" ? "女" : "男"})`;
+            }
+
+            option.innerHTML = `
+              ${displayText}
+              <span class="voice-gender">${voice.gender === "Female" ? "女性" : "男性"}</span>
+            `;
+
+            option.onclick = () => selectVoice(voice);
+            voiceList.appendChild(option);
+          });
+
+          voicesContainer.appendChild(voiceList);
+        }
+
+        // 选择语音
+        function selectVoice(voice) {
+          document.querySelectorAll(".voice-option").forEach((opt) => {
+            opt.classList.remove("selected");
+            if (opt.dataset.name === voice.name) {
+              opt.classList.add("selected");
+            }
+          });
+
+          document.getElementById("voice").value = voice.name;
+          document.getElementById("selected-voice-display").textContent = voice.displayName || `${voice.name} (${voice.gender === "Female" ? "女" : "男"})`;
+        }
+
+        // 过滤语音
+        function filterVoices(query) {
+          query = query.toLowerCase();
+          let found = false;
+
+          // 显示所有语言标签
+          document.querySelectorAll(".language-tabs .nav-link").forEach((tab) => {
+            tab.style.display = "block";
+          });
+
+          if (!query) {
+            // 如果没有查询，恢复到当前选择的语言
+            updateVoiceOptions(activeLanguage);
+            return;
+          }
+
+          const voicesContainer = document.getElementById("voice-tabs-content");
+          voicesContainer.innerHTML = "";
+          const voiceList = document.createElement("div");
+          voiceList.className = "voice-list";
+
+          // 在所有语言中搜索
+          Object.keys(allVoices).forEach((langCode) => {
+            const voices = allVoices[langCode];
+            voices.forEach((voice) => {
+              const name = voice.name.toLowerCase();
+              const displayName = (voice.displayName || "").toLowerCase();
+              const localName = (voice.localName || "").toLowerCase();
+
+              if (name.includes(query) || displayName.includes(query) || localName.includes(query)) {
+                found = true;
+                const option = document.createElement("div");
+                option.className = "voice-option";
+                option.dataset.name = voice.name;
+
+                let displayText = voice.displayName || voice.name;
+                if (!voice.displayName && voice.localName) {
+                  displayText = `${voice.localName} (${voice.gender === "Female" ? "女" : "男"})`;
+                }
+
+                // 添加语言标识
+                const langName = languageNames[langCode] || langCode;
+
+                option.innerHTML = `
+                  <span class="badge bg-info me-2">${langName}</span>
+                  ${displayText}
+                  <span class="voice-gender">${voice.gender === "Female" ? "女性" : "男性"}</span>
+                `;
+
+                option.onclick = () => {
+                  selectVoice(voice);
+                  // 切换到对应的语言标签
+                  document.querySelectorAll(".language-tabs .nav-link").forEach((t) => {
+                    t.classList.remove("active");
+                    if (t.dataset.langCode === langCode) {
+                      t.classList.add("active");
+                    }
+                  });
+                  activeLanguage = langCode;
+                  document.getElementById("voice-search").value = "";
+                  updateVoiceOptions(langCode);
+                };
+                voiceList.appendChild(option);
+              }
+            });
+          });
+
+          if (found) {
+            voicesContainer.appendChild(voiceList);
+          } else {
+            voicesContainer.innerHTML = '<div class="text-center text-muted py-3">未找到匹配的语音</div>';
+          }
+        }
+
+        // 历史记录存储
+        let history = JSON.parse(localStorage.getItem("ttsHistory")) || [];
+        updateHistoryUI();
+
+        // 表单提交
+        document.getElementById("tts-form").addEventListener("submit", function (e) {
+          e.preventDefault();
+
+          const generateBtn = document.getElementById("generate-btn");
+          generateBtn.disabled = true;
+          generateBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 生成中...';
+
+          const formData = new FormData();
+          formData.append("text", document.getElementById("text").value);
+          formData.append("voice", document.getElementById("voice").value);
+          formData.append("rate", document.getElementById("rate").value);
+          formData.append("volume", document.getElementById("volume").value);
+          formData.append("pitch", document.getElementById("pitch").value);
+
+          fetch("/synthesize", {
+            method: "POST",
+            body: formData,
+          })
+            .then((response) => response.json())
+            .then((data) => {
+              if (data.success) {
+                document.getElementById("result-card").classList.remove("d-none");
+                const audioPlayer = document.getElementById("audio-player");
+                audioPlayer.src = data.audio_url;
+
+                // 设置下载链接
+                document.getElementById("download-btn").onclick = function () {
+                  window.location.href = `/download/${data.filename}`;
+                };
+
+                // 保存按钮事件
+                document.getElementById("save-btn").onclick = function () {
+                  const historyItem = {
+                    text: document.getElementById("text").value,
+                    voice: document.getElementById("voice").value,
+                    voiceDisplay: document.getElementById("selected-voice-display").textContent,
+                    audio_url: data.audio_url,
+                    filename: data.filename,
+                    date: new Date().toLocaleString(),
+                  };
+
+                  history.unshift(historyItem);
+                  if (history.length > 10) history.pop(); // 限制历史记录数量
+
+                  localStorage.setItem("ttsHistory", JSON.stringify(history));
+                  updateHistoryUI();
+                };
+
+                audioPlayer.play();
+              } else {
+                alert("生成失败: " + data.error);
+              }
+            })
+            .catch((error) => {
+              console.error("错误:", error);
+              alert("请求失败，请稍后再试");
+            })
+            .finally(() => {
+              generateBtn.disabled = false;
+              generateBtn.textContent = "生成语音";
+            });
+        });
+
+        // 更新历史记录UI
+        function updateHistoryUI() {
+          const historyList = document.getElementById("history-list");
+          const noHistory = document.getElementById("no-history");
+
+          if (history.length === 0) {
+            noHistory.classList.remove("d-none");
+            return;
+          }
+
+          noHistory.classList.add("d-none");
+          historyList.innerHTML = "";
+
+          history.forEach((item, index) => {
+            const historyItem = document.createElement("div");
+            historyItem.className = "history-item";
+            historyItem.innerHTML = `
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <p class="mb-1 text-truncate" style="max-width: 400px;">${item.text}</p>
+                  <small class="text-muted">${item.voiceDisplay || item.voice} · ${item.date}</small>
+                </div>
+                <div>
+                  <button class="btn btn-sm btn-outline-primary play-history" data-url="${item.audio_url}">播放</button>
+                  <button class="btn btn-sm btn-outline-success download-history" data-filename="${item.filename}">下载</button>
+                  <button class="btn btn-sm btn-outline-danger delete-history" data-index="${index}">删除</button>
+                </div>
+              </div>
+            `;
+            historyList.appendChild(historyItem);
+          });
+
+          // 添加历史项事件
+          document.querySelectorAll(".play-history").forEach((btn) => {
+            btn.addEventListener("click", function () {
+              document.getElementById("audio-player").src = this.dataset.url;
+              document.getElementById("audio-player").play();
+              document.getElementById("result-card").classList.remove("d-none");
+            });
+          });
+
+          document.querySelectorAll(".download-history").forEach((btn) => {
+            btn.addEventListener("click", function () {
+              window.location.href = `/download/${this.dataset.filename}`;
+            });
+          });
+
+          document.querySelectorAll(".delete-history").forEach((btn) => {
+            btn.addEventListener("click", function () {
+              history.splice(parseInt(this.dataset.index), 1);
+              localStorage.setItem("ttsHistory", JSON.stringify(history));
+              updateHistoryUI();
+            });
+          });
+        }
+      });
+    </script>
+  </body>
+</html>
