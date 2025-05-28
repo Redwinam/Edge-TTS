@@ -7,7 +7,7 @@ TTS 服务 - 优化版替换原版
 
 import os
 import uuid
-from flask import Flask, render_template, request, send_from_directory, jsonify, Response
+from flask import Flask, render_template, request, send_from_directory, jsonify, Response, make_response
 import asyncio
 import edge_tts
 import re
@@ -21,14 +21,14 @@ import aiofiles
 from typing import List, Dict, Tuple
 
 app = Flask(__name__)
-# 增强CORS配置，允许任何域名播放音频
+# 简化CORS配置，只使用Flask-CORS来管理所有CORS设置
 CORS(app, 
-     origins="*",  # 允许所有域名
-     methods=["GET", "POST", "OPTIONS"],  # 允许的HTTP方法
-     allow_headers=["Content-Type", "Authorization", "Range"],  # 允许的请求头，Range对音频流很重要
-     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],  # 暴露的响应头，对音频播放很重要
-     supports_credentials=False,  # 不需要凭证
-     max_age=86400  # 预检请求缓存时间（24小时）
+     origins=["*"],  # 改为数组格式
+     methods=["GET", "POST", "OPTIONS", "HEAD"],
+     allow_headers=["Content-Type", "Authorization", "Range", "Accept", "Accept-Encoding", "Accept-Language"],
+     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Type"],
+     supports_credentials=False,
+     max_age=86400
 )
 
 # 配置静态文件夹用于存储生成的音频文件
@@ -539,36 +539,67 @@ def serve_audio(filename):
     专门服务音频文件，支持跨域播放和Range请求
     这对于在不同域名下播放音频非常重要
     """
-    from flask import make_response
+    from flask import make_response, request as flask_request
     
-    response = make_response(send_from_directory(app.config['UPLOAD_FOLDER'], filename))
-    
-    # 添加CORS头部
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Range, Content-Type'
-    response.headers['Access-Control-Expose-Headers'] = 'Content-Range, Accept-Ranges, Content-Length'
-    
-    # 添加音频播放相关头部
-    response.headers['Accept-Ranges'] = 'bytes'
-    response.headers['Content-Type'] = 'audio/mpeg'
-    response.headers['Cache-Control'] = 'public, max-age=3600'  # 缓存1小时
-    
-    return response
-
-# 处理OPTIONS预检请求
-@app.route('/static/audio/<filename>', methods=['OPTIONS'])
-def serve_audio_options(filename):
-    """处理音频文件的OPTIONS预检请求"""
-    from flask import make_response
-    
-    response = make_response()
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Range, Content-Type'
-    response.headers['Access-Control-Max-Age'] = '86400'  # 预检缓存24小时
-    
-    return response
+    try:
+        # 构建文件路径
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            return jsonify({'error': '音频文件不存在'}), 404
+        
+        # 获取文件大小
+        file_size = os.path.getsize(file_path)
+        
+        # 处理Range请求（用于音频流播放）
+        range_header = flask_request.headers.get('Range', None)
+        
+        if range_header:
+            # 解析Range头部
+            byte_start = 0
+            byte_end = file_size - 1
+            
+            # 解析 "bytes=start-end" 格式
+            if range_header.startswith('bytes='):
+                range_match = range_header[6:].split('-')
+                if range_match[0]:
+                    byte_start = int(range_match[0])
+                if range_match[1]:
+                    byte_end = int(range_match[1])
+            
+            # 确保范围有效
+            byte_start = max(0, byte_start)
+            byte_end = min(file_size - 1, byte_end)
+            content_length = byte_end - byte_start + 1
+            
+            # 读取指定范围的数据
+            with open(file_path, 'rb') as audio_file:
+                audio_file.seek(byte_start)
+                data = audio_file.read(content_length)
+            
+            # 创建206 Partial Content响应
+            response = make_response(data)
+            response.status_code = 206
+            response.headers['Content-Range'] = f'bytes {byte_start}-{byte_end}/{file_size}'
+            response.headers['Content-Length'] = str(content_length)
+        else:
+            # 普通请求，返回完整文件
+            response = make_response(send_from_directory(app.config['UPLOAD_FOLDER'], filename))
+        
+        # 添加音频播放相关头部
+        response.headers['Accept-Ranges'] = 'bytes'
+        response.headers['Content-Type'] = 'audio/mpeg'
+        response.headers['Cache-Control'] = 'public, max-age=3600'  # 缓存1小时
+        
+        # 防止浏览器缓存策略问题
+        response.headers['Vary'] = 'Accept-Encoding, Range'
+        
+        return response
+        
+    except Exception as e:
+        print(f"音频文件服务错误: {e}")
+        return jsonify({'error': f'服务音频文件失败: {str(e)}'}), 500
 
 # 新增: 音频分析功能
 def analyze_audio_duration(audio_path):
@@ -881,6 +912,19 @@ def api_batch_tts_with_timecodes():
             pass
         return jsonify({'error': f'批量TTS处理失败: {str(e)}'}), 500
 
+# 添加健康检查端点
+@app.route('/health', methods=['GET'])
+def health_check():
+    """健康检查端点"""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'TTS Server',
+        'version': '2.0',
+        'timestamp': time.time(),
+        'cors_enabled': True,
+        'max_concurrent_tasks': MAX_CONCURRENT_TASKS
+    })
+
 if __name__ == '__main__':
     print("=" * 60)
     print("🎵 TTS 智能优化服务 v2.0")
@@ -890,7 +934,7 @@ if __name__ == '__main__':
     print("   ⚡ 智能并发处理")
     print("   🎯 自动性能优化")
     print("   💾 智能缓存系统")
-    print("   �� 强化错误恢复")
+    print("   💪 强化错误恢复")
     print("   🌐 支持跨域访问 (CORS)")
     print("   🎵 允许任何域名播放音频")
     print()
