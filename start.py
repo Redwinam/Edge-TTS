@@ -12,6 +12,8 @@ def main():
     print("📍 完全兼容原有 API")
     print("⚡ 智能并发处理")
     print("🎯 自动性能优化")
+    print("🌐 支持跨域访问 (CORS)")
+    print("🎵 允许任何域名播放音频")
     print("=" * 40)
     
     # 检查依赖

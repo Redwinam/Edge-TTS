@@ -21,8 +21,15 @@ import aiofiles
 from typing import List, Dict, Tuple
 
 app = Flask(__name__)
-# 启用CORS，允许跨域请求，这对浏览器插件调用API很重要
-CORS(app)
+# 增强CORS配置，允许任何域名播放音频
+CORS(app, 
+     origins="*",  # 允许所有域名
+     methods=["GET", "POST", "OPTIONS"],  # 允许的HTTP方法
+     allow_headers=["Content-Type", "Authorization", "Range"],  # 允许的请求头，Range对音频流很重要
+     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],  # 暴露的响应头，对音频播放很重要
+     supports_credentials=False,  # 不需要凭证
+     max_age=86400  # 预检请求缓存时间（24小时）
+)
 
 # 配置静态文件夹用于存储生成的音频文件
 UPLOAD_FOLDER = 'static/audio'
@@ -525,6 +532,44 @@ def api_combine_audio():
 def download(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=True)
 
+# 新增：专门的音频文件服务，支持跨域播放和Range请求
+@app.route('/static/audio/<filename>')
+def serve_audio(filename):
+    """
+    专门服务音频文件，支持跨域播放和Range请求
+    这对于在不同域名下播放音频非常重要
+    """
+    from flask import make_response
+    
+    response = make_response(send_from_directory(app.config['UPLOAD_FOLDER'], filename))
+    
+    # 添加CORS头部
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Range, Content-Type'
+    response.headers['Access-Control-Expose-Headers'] = 'Content-Range, Accept-Ranges, Content-Length'
+    
+    # 添加音频播放相关头部
+    response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['Content-Type'] = 'audio/mpeg'
+    response.headers['Cache-Control'] = 'public, max-age=3600'  # 缓存1小时
+    
+    return response
+
+# 处理OPTIONS预检请求
+@app.route('/static/audio/<filename>', methods=['OPTIONS'])
+def serve_audio_options(filename):
+    """处理音频文件的OPTIONS预检请求"""
+    from flask import make_response
+    
+    response = make_response()
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Range, Content-Type'
+    response.headers['Access-Control-Max-Age'] = '86400'  # 预检缓存24小时
+    
+    return response
+
 # 新增: 音频分析功能
 def analyze_audio_duration(audio_path):
     """分析音频文件时长"""
@@ -845,11 +890,14 @@ if __name__ == '__main__':
     print("   ⚡ 智能并发处理")
     print("   🎯 自动性能优化")
     print("   💾 智能缓存系统")
-    print("   🔄 强化错误恢复")
+    print("   �� 强化错误恢复")
+    print("   🌐 支持跨域访问 (CORS)")
+    print("   🎵 允许任何域名播放音频")
     print()
     print("🌐 服务地址: http://localhost:5020")
     print("📊 当前并发配置:", MAX_CONCURRENT_TASKS)
     print("💡 提示: 可通过环境变量 MAX_CONCURRENT_TASKS 调整并发数")
+    print("🎧 音频URL: http://localhost:5020/static/audio/<filename>")
     print("=" * 60)
     
     app.run(debug=True, host='0.0.0.0', port=5020) 
