@@ -9,6 +9,9 @@ import time
 import hashlib
 import shutil
 import json
+from concurrent.futures import ThreadPoolExecutor
+import aiofiles
+from typing import List, Dict, Tuple
 
 app = Flask(__name__)
 # 启用CORS，允许跨域请求，这对浏览器插件调用API很重要
@@ -23,6 +26,10 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # 默认语音
 DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural'
+
+# 并发配置
+MAX_CONCURRENT_TASKS = 10  # 最大并发任务数
+SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 # 重试装饰器
 def async_retry(retries=3, delay=1):
@@ -152,6 +159,111 @@ def get_voices():
     finally:
         loop.close()
 
+# 优化的缓存管理类
+class TTSCache:
+    def __init__(self, cache_dir):
+        self.cache_dir = cache_dir
+        
+    def get_cache_key(self, text: str, voice: str, rate: str, volume: str, pitch: str) -> str:
+        """生成缓存键"""
+        cache_key_str = f"{text}-{voice}-{rate}-{volume}-{pitch}"
+        return hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
+    
+    def get_cache_path(self, cache_key: str) -> str:
+        """获取缓存文件路径"""
+        return os.path.join(self.cache_dir, f"cache_{cache_key}.mp3")
+    
+    def is_cached(self, cache_key: str) -> bool:
+        """检查是否有缓存"""
+        return os.path.exists(self.get_cache_path(cache_key))
+    
+    async def copy_from_cache(self, cache_key: str, output_path: str) -> bool:
+        """从缓存复制文件"""
+        try:
+            cache_path = self.get_cache_path(cache_key)
+            if self.is_cached(cache_key):
+                shutil.copyfile(cache_path, output_path)
+                print(f"缓存命中: cache_{cache_key}.mp3，使用缓存文件。")
+                return True
+        except Exception as e:
+            print(f"从缓存复制文件失败: {e}")
+        return False
+    
+    async def save_to_cache(self, cache_key: str, source_path: str):
+        """保存到缓存"""
+        try:
+            cache_path = self.get_cache_path(cache_key)
+            shutil.copyfile(source_path, cache_path)
+            print(f"已缓存新文件: cache_{cache_key}.mp3")
+        except Exception as e:
+            print(f"保存到缓存失败: {e}")
+
+# 创建缓存管理器
+tts_cache = TTSCache(UPLOAD_FOLDER)
+
+@async_retry(retries=3, delay=2)
+async def generate_tts_concurrent(text: str, output_path: str, voice: str, rate: str, volume: str, pitch: str):
+    """并发安全的TTS生成函数"""
+    async with SEMAPHORE:  # 限制并发数量
+        # 检查缓存
+        cache_key = tts_cache.get_cache_key(text, voice, rate, volume, pitch)
+        
+        if await tts_cache.copy_from_cache(cache_key, output_path):
+            return True
+        
+        print(f"缓存未命中: cache_{cache_key}.mp3，生成新文件。")
+        
+        # 生成TTS
+        communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
+        await communicate.save(output_path)
+        
+        # 保存到缓存
+        await tts_cache.save_to_cache(cache_key, output_path)
+        return True
+
+# 批量并发生成TTS
+async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: str, pitch: str) -> List[Tuple[str, Dict]]:
+    """批量并发生成TTS音频"""
+    tasks = []
+    temp_files = []
+    
+    for i, item in enumerate(items):
+        text = item.get('text', '').strip()
+        if not text:
+            continue
+            
+        voice = item.get('voice', DEFAULT_VOICE)
+        item_rate = item.get('rate', rate)
+        item_volume = item.get('volume', volume)
+        item_pitch = item.get('pitch', pitch)
+        
+        # 生成临时文件名
+        temp_filename = f"batch_{uuid.uuid4()}.mp3"
+        temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
+        
+        # 创建异步任务
+        task = generate_tts_concurrent(text, temp_path, voice, item_rate, item_volume, item_pitch)
+        tasks.append((task, temp_path, item, i))
+    
+    print(f"开始并发生成 {len(tasks)} 个TTS音频...")
+    
+    # 使用 asyncio.gather 进行并发执行
+    results = []
+    completed_tasks = await asyncio.gather(*[task[0] for task in tasks], return_exceptions=True)
+    
+    for i, (result, (_, temp_path, item, index)) in enumerate(zip(completed_tasks, tasks)):
+        if isinstance(result, Exception):
+            print(f"任务 {index+1} 失败: {result}")
+            continue
+        
+        if result and os.path.exists(temp_path):
+            results.append((temp_path, item))
+            print(f"已生成音频 {index+1}/{len(items)}: {item.get('text', '')[:20]}...")
+        else:
+            print(f"任务 {index+1} 生成失败")
+    
+    return results
+
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
     text = request.form.get('text', '')
@@ -171,7 +283,7 @@ def synthesize():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(generate_tts(text, output_path, voice, rate, volume, pitch))
+        loop.run_until_complete(generate_tts_concurrent(text, output_path, voice, rate, volume, pitch))
         audio_url = f"/static/audio/{filename}"
         return jsonify({'success': True, 'audio_url': audio_url, 'filename': filename})
     except Exception as e:
@@ -215,7 +327,7 @@ def api_tts():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(generate_tts(text, output_path, voice, rate, volume, pitch))
+            loop.run_until_complete(generate_tts_concurrent(text, output_path, voice, rate, volume, pitch))
             
             if return_type == 'audio':
                 # 直接返回音频文件
@@ -278,46 +390,6 @@ def api_voices():
         return jsonify(fallback_voices)
     finally:
         loop.close()
-
-@async_retry(retries=3, delay=2)
-async def generate_tts(text, output_path, voice, rate, volume, pitch):
-    # --- 缓存逻辑开始 ---
-    # 1. 构建缓存键字符串，包含所有影响语音输出的参数
-    cache_key_str = f"{text}-{voice}-{rate}-{volume}-{pitch}"
-    
-    # 2. 为缓存键生成MD5哈希值
-    file_hash = hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
-    
-    # 3. 构造缓存文件名和路径
-    cached_filename = f"cache_{file_hash}.mp3"
-    cached_file_path = os.path.join(app.config['UPLOAD_FOLDER'], cached_filename)
-    
-    # 4. 检查缓存文件是否存在
-    if os.path.exists(cached_file_path):
-        try:
-            print(f"缓存命中: {cached_filename}，使用缓存文件。")
-            # 如果缓存存在，将缓存文件复制到期望的输出路径
-            shutil.copyfile(cached_file_path, output_path)
-            return # 提前返回，无需重新生成
-        except Exception as e:
-            print(f"从缓存复制文件失败: {e}，将重新生成。")
-            # 如果复制失败，则继续执行生成逻辑
-
-    print(f"缓存未命中: {cached_filename}，生成新文件。")
-    # --- 缓存逻辑结束 ---
-    
-    # 如果缓存未命中或复制缓存失败，则正常生成TTS
-    communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
-    await communicate.save(output_path)
-    
-    # --- 缓存保存逻辑 ---
-    # 生成成功后，将新文件复制到缓存位置
-    try:
-        shutil.copyfile(output_path, cached_file_path)
-        print(f"已缓存新文件: {cached_filename}")
-    except Exception as e:
-        print(f"保存到缓存失败: {e}")
-    # --- 缓存保存逻辑结束 ---
 
 # 音频合并API端点
 @app.route('/api/combine_audio', methods=['POST'])
@@ -432,6 +504,88 @@ def analyze_audio_duration(audio_path):
         print(f"分析音频时长失败: {e}")
         return 1.0  # 默认1秒
 
+# 优化的批量TTS生成API（支持并发）
+@app.route('/api/batch_tts_concurrent', methods=['POST'])
+def api_batch_tts_concurrent():
+    """
+    高性能并发批量生成TTS音频并合并
+    """
+    try:
+        data = request.get_json()
+        if not data or 'items' not in data:
+            return jsonify({'error': '请提供TTS项目列表'}), 400
+        
+        items = data.get('items', [])
+        output_name = data.get('output_name', f'batch_tts_{uuid.uuid4()}.mp3')
+        rate = data.get('rate', '+0%')
+        volume = data.get('volume', '+0%')
+        pitch = data.get('pitch', '+0Hz')
+        silence_duration = data.get('silence_duration', 200)  # 默认200ms
+        max_concurrent = data.get('max_concurrent', MAX_CONCURRENT_TASKS)  # 允许自定义并发数
+        
+        if not items:
+            return jsonify({'error': 'TTS项目列表不能为空'}), 400
+        
+        # 临时调整并发限制
+        global SEMAPHORE
+        original_semaphore = SEMAPHORE
+        if max_concurrent != MAX_CONCURRENT_TASKS:
+            SEMAPHORE = asyncio.Semaphore(max_concurrent)
+        
+        start_time = time.time()
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # 并发生成所有音频文件
+            results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch))
+            
+            if not results:
+                return jsonify({'error': '没有生成任何音频文件'}), 400
+            
+            # 按原始顺序排序结果
+            temp_files = [result[0] for result in results]
+            
+            # 合并所有音频文件
+            output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
+            success = combine_audio_files(temp_files, output_path, silence_duration)
+            
+            # 清理临时文件
+            for temp_file in temp_files:
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+            
+            generation_time = time.time() - start_time
+            
+            if success:
+                # 构建下载URL
+                host = request.host_url.rstrip('/')
+                download_url = f"{host}/static/audio/{output_name}"
+                
+                return jsonify({
+                    'success': True,
+                    'download_url': download_url,
+                    'filename': output_name,
+                    'items_processed': len(results),
+                    'total_items': len(items),
+                    'generation_time': round(generation_time, 2),
+                    'concurrent_tasks': max_concurrent,
+                    'performance_info': f"并发生成 {len(results)} 个音频文件，用时 {generation_time:.2f} 秒"
+                })
+            else:
+                return jsonify({'error': '音频合并失败'}), 500
+                
+        finally:
+            # 恢复原始信号量
+            SEMAPHORE = original_semaphore
+            loop.close()
+            
+    except Exception as e:
+        return jsonify({'error': f'并发批量TTS处理失败: {str(e)}'}), 500
+
 # 修改批量TTS生成函数，支持返回时间点信息
 @app.route('/api/batch_tts_with_timecodes', methods=['POST'])
 def api_batch_tts_with_timecodes():
@@ -450,12 +604,12 @@ def api_batch_tts_with_timecodes():
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
         silence_duration = data.get('silence_duration', 200)  # 默认200ms
+        use_concurrent = data.get('use_concurrent', True)  # 是否使用并发处理
         
         if not items:
             return jsonify({'error': 'TTS项目列表不能为空'}), 400
         
-        # 生成所有音频文件并记录时间点
-        temp_files = []
+        start_time = time.time()
         timecodes = []
         current_time = 0.0
         
@@ -463,40 +617,77 @@ def api_batch_tts_with_timecodes():
         asyncio.set_event_loop(loop)
         
         try:
-            for i, item in enumerate(items):
-                text = item.get('text', '')
-                voice = item.get('voice', DEFAULT_VOICE)
-                item_rate = item.get('rate', rate)
-                item_volume = item.get('volume', volume)
-                item_pitch = item.get('pitch', pitch)
+            if use_concurrent:
+                # 使用并发处理
+                results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch))
+                temp_files = []
                 
-                if not text.strip():
-                    continue
-                
-                # 生成临时文件名
-                temp_filename = f"batch_{uuid.uuid4()}.mp3"
-                temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
-                
-                # 生成TTS音频
-                loop.run_until_complete(generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch))
-                
-                # 分析音频时长
-                duration = analyze_audio_duration(temp_path)
-                
-                # 记录时间点信息
-                timecodes.append({
-                    'index': i,
-                    'text': text,
-                    'voice': voice,
-                    'start_time': current_time,
-                    'end_time': current_time + duration,
-                    'duration': duration
-                })
-                
-                temp_files.append(temp_path)
-                current_time += duration + (silence_duration / 1000.0)  # 加上静音间隔
-                
-                print(f"已生成音频 {i+1}/{len(items)}: {text[:20]}... (时长: {duration:.2f}s)")
+                # 按原始顺序处理结果并计算时间点
+                for i, item in enumerate(items):
+                    text = item.get('text', '').strip()
+                    if not text:
+                        continue
+                        
+                    # 找到对应的生成结果
+                    matching_result = None
+                    for temp_path, result_item in results:
+                        if result_item.get('text', '').strip() == text:
+                            matching_result = temp_path
+                            break
+                    
+                    if matching_result and os.path.exists(matching_result):
+                        # 分析音频时长
+                        duration = analyze_audio_duration(matching_result)
+                        
+                        # 记录时间点信息
+                        timecodes.append({
+                            'index': i,
+                            'text': text,
+                            'voice': item.get('voice', DEFAULT_VOICE),
+                            'start_time': current_time,
+                            'end_time': current_time + duration,
+                            'duration': duration
+                        })
+                        
+                        temp_files.append(matching_result)
+                        current_time += duration + (silence_duration / 1000.0)
+            else:
+                # 使用串行处理（保持原有逻辑）
+                temp_files = []
+                for i, item in enumerate(items):
+                    text = item.get('text', '')
+                    voice = item.get('voice', DEFAULT_VOICE)
+                    item_rate = item.get('rate', rate)
+                    item_volume = item.get('volume', volume)
+                    item_pitch = item.get('pitch', pitch)
+                    
+                    if not text.strip():
+                        continue
+                    
+                    # 生成临时文件名
+                    temp_filename = f"batch_{uuid.uuid4()}.mp3"
+                    temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
+                    
+                    # 生成TTS音频
+                    loop.run_until_complete(generate_tts_concurrent(text, temp_path, voice, item_rate, item_volume, item_pitch))
+                    
+                    # 分析音频时长
+                    duration = analyze_audio_duration(temp_path)
+                    
+                    # 记录时间点信息
+                    timecodes.append({
+                        'index': i,
+                        'text': text,
+                        'voice': voice,
+                        'start_time': current_time,
+                        'end_time': current_time + duration,
+                        'duration': duration
+                    })
+                    
+                    temp_files.append(temp_path)
+                    current_time += duration + (silence_duration / 1000.0)  # 加上静音间隔
+                    
+                    print(f"已生成音频 {i+1}/{len(items)}: {text[:20]}... (时长: {duration:.2f}s)")
             
             if not temp_files:
                 return jsonify({'error': '没有生成任何音频文件'}), 400
@@ -511,6 +702,8 @@ def api_batch_tts_with_timecodes():
                     os.remove(temp_file)
                 except:
                     pass
+            
+            generation_time = time.time() - start_time
             
             if success:
                 # 构建下载URL
@@ -527,7 +720,9 @@ def api_batch_tts_with_timecodes():
                     'items_processed': len(temp_files),
                     'timecodes': timecodes,
                     'total_duration': total_duration,
-                    'silence_duration': silence_duration / 1000.0
+                    'silence_duration': silence_duration / 1000.0,
+                    'generation_time': round(generation_time, 2),
+                    'processing_method': 'concurrent' if use_concurrent else 'serial'
                 })
             else:
                 return jsonify({'error': '音频合并失败'}), 500
@@ -537,26 +732,19 @@ def api_batch_tts_with_timecodes():
             
     except Exception as e:
         # 清理可能残留的临时文件
-        for temp_file in temp_files:
-            try:
+        try:
+            for temp_file in temp_files:
                 os.remove(temp_file)
-            except:
-                pass
+        except:
+            pass
         return jsonify({'error': f'批量TTS处理失败: {str(e)}'}), 500
 
-# 保留原有的批量TTS API端点（向后兼容）
+# 保留原有的批量TTS API端点（现在默认使用并发处理）
 @app.route('/api/batch_tts', methods=['POST'])
 def api_batch_tts():
     """
-    批量生成TTS音频并合并
-    接收格式: {
-        "items": [
-            {"text": "文本内容", "voice": "语音名称"},
-            {"text": "文本内容", "voice": "语音名称"}
-        ],
-        "output_name": "输出文件名",
-        "silence_duration": 200  // 可选：静音间隔时长（毫秒）
-    }
+    批量生成TTS音频并合并（现在默认使用并发处理以提升性能）
+    保持API兼容性，前端无需修改
     """
     try:
         data = request.get_json()
@@ -569,36 +757,57 @@ def api_batch_tts():
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
         silence_duration = data.get('silence_duration', 200)  # 默认200ms
+        # 新增：支持禁用并发处理（用于兼容性）
+        use_concurrent = data.get('use_concurrent', True)  # 默认启用并发
+        max_concurrent = data.get('max_concurrent', MAX_CONCURRENT_TASKS)  # 允许自定义并发数
         
         if not items:
             return jsonify({'error': 'TTS项目列表不能为空'}), 400
         
-        # 依次生成所有音频文件
-        temp_files = []
+        start_time = time.time()
+        
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
         try:
-            for i, item in enumerate(items):
-                text = item.get('text', '')
-                voice = item.get('voice', DEFAULT_VOICE)
-                # 每个item可以有独立的速度、音量、音调参数，如果没有则使用全局默认值
-                item_rate = item.get('rate', rate)
-                item_volume = item.get('volume', volume)
-                item_pitch = item.get('pitch', pitch)
+            if use_concurrent and len(items) > 3:  # 大于3个项目时使用并发
+                # 临时调整并发限制
+                global SEMAPHORE
+                original_semaphore = SEMAPHORE
+                if max_concurrent != MAX_CONCURRENT_TASKS:
+                    SEMAPHORE = asyncio.Semaphore(max_concurrent)
                 
-                if not text.strip():
-                    continue
-                
-                # 生成临时文件名
-                temp_filename = f"batch_{uuid.uuid4()}.mp3"
-                temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
-                
-                # 生成TTS音频，使用每个item独立的参数
-                loop.run_until_complete(generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch))
-                temp_files.append(temp_path)
-                
-                print(f"已生成音频 {i+1}/{len(items)}: {text[:20]}...")
+                try:
+                    # 使用并发处理
+                    print(f"使用并发处理模式，并发数: {max_concurrent}")
+                    results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch))
+                    temp_files = [result[0] for result in results]
+                finally:
+                    # 恢复原始信号量
+                    SEMAPHORE = original_semaphore
+            else:
+                # 使用串行处理（向后兼容或少量项目）
+                print("使用串行处理模式")
+                temp_files = []
+                for i, item in enumerate(items):
+                    text = item.get('text', '')
+                    voice = item.get('voice', DEFAULT_VOICE)
+                    item_rate = item.get('rate', rate)
+                    item_volume = item.get('volume', volume)
+                    item_pitch = item.get('pitch', pitch)
+                    
+                    if not text.strip():
+                        continue
+                    
+                    # 生成临时文件名
+                    temp_filename = f"batch_{uuid.uuid4()}.mp3"
+                    temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
+                    
+                    # 生成TTS音频
+                    loop.run_until_complete(generate_tts_concurrent(text, temp_path, voice, item_rate, item_volume, item_pitch))
+                    temp_files.append(temp_path)
+                    
+                    print(f"已生成音频 {i+1}/{len(items)}: {text[:20]}...")
             
             if not temp_files:
                 return jsonify({'error': '没有生成任何音频文件'}), 400
@@ -614,17 +823,30 @@ def api_batch_tts():
                 except:
                     pass
             
+            generation_time = time.time() - start_time
+            
             if success:
                 # 构建下载URL
                 host = request.host_url.rstrip('/')
                 download_url = f"{host}/static/audio/{output_name}"
                 
-                return jsonify({
+                # 返回与原API兼容的响应格式
+                response_data = {
                     'success': True,
                     'download_url': download_url,
                     'filename': output_name,
                     'items_processed': len(temp_files)
-                })
+                }
+                
+                # 可选：添加性能信息（不影响原有前端）
+                if use_concurrent and len(items) > 3:
+                    response_data['generation_time'] = round(generation_time, 2)
+                    response_data['processing_mode'] = 'concurrent'
+                    response_data['performance_info'] = f"并发处理 {len(temp_files)} 个音频文件，用时 {generation_time:.2f} 秒"
+                else:
+                    response_data['processing_mode'] = 'serial'
+                
+                return jsonify(response_data)
             else:
                 return jsonify({'error': '音频合并失败'}), 500
                 
@@ -633,12 +855,13 @@ def api_batch_tts():
             
     except Exception as e:
         # 清理可能残留的临时文件
-        for temp_file in temp_files:
-            try:
+        try:
+            for temp_file in temp_files:
                 os.remove(temp_file)
-            except:
-                pass
+        except:
+            pass
         return jsonify({'error': f'批量TTS处理失败: {str(e)}'}), 500
 
 if __name__ == '__main__':
+    print(f"TTS服务启动，最大并发任务数: {MAX_CONCURRENT_TASKS}")
     app.run(debug=True, host='0.0.0.0', port=5020) 
