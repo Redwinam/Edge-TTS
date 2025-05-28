@@ -233,12 +233,12 @@ async def generate_tts(text, output_path, voice, rate, volume, pitch):
                 print(f"缓存命中: {cached_filename}，使用缓存文件。")
                 # 如果缓存存在，将缓存文件复制到期望的输出路径
                 shutil.copyfile(cached_file_path, output_path)
-                return # 提前返回，无需重新生成
+                return True # 明确返回True
             except Exception as e:
                 print(f"从缓存复制文件失败: {e}，将重新生成。")
                 # 如果复制失败，则继续执行生成逻辑
 
-        print(f"缓存未命中: {cached_filename}，生成新文件。")
+        print(f"缓存未命中: {cached_filename}，生成新文件: {text[:30]}...")
         # --- 缓存逻辑结束 ---
         
         # 如果缓存未命中或复制缓存失败，则正常生成TTS
@@ -253,12 +253,13 @@ async def generate_tts(text, output_path, voice, rate, volume, pitch):
         except Exception as e:
             print(f"保存到缓存失败: {e}")
         # --- 缓存保存逻辑结束 ---
+        return True # 明确返回True
 
 # 批量并发生成TTS
 async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: str, pitch: str) -> List[Tuple[str, Dict]]:
     """批量并发生成TTS音频"""
     tasks = []
-    temp_files = []
+    # temp_files 变量在此处未使用，可以考虑移除或后续用于其他逻辑
     
     for i, item in enumerate(items):
         text = item.get('text', '').strip()
@@ -276,24 +277,30 @@ async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: st
         
         # 创建异步任务
         task = generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch)
-        tasks.append((task, temp_path, item, i))
+        tasks.append((task, temp_path, item, i)) # item 和 i 用于结果匹配
     
     print(f"开始智能并发生成 {len(tasks)} 个TTS音频...")
     
     # 使用 asyncio.gather 进行并发执行
     results = []
-    completed_tasks = await asyncio.gather(*[task[0] for task in tasks], return_exceptions=True)
+    # tasks_to_gather = [t[0] for t in tasks] # 提取coroutine对象
+    completed_tasks_results = await asyncio.gather(*[task_info[0] for task_info in tasks], return_exceptions=True)
     
-    for i, (result, (_, temp_path, item, index)) in enumerate(zip(completed_tasks, tasks)):
+    for i, task_info in enumerate(tasks):
+        original_task, temp_path, item_details, original_index = task_info
+        result = completed_tasks_results[i] # 按顺序获取结果
+
         if isinstance(result, Exception):
-            print(f"任务 {index+1} 失败: {result}")
+            # 增强日志：打印异常类型、repr和str
+            print(f"任务 {original_index + 1} (文本: '{item_details.get('text', '')[:20]}...') 失败. Type: {type(result)}, repr: {repr(result)}, str: {str(result)}")
             continue
         
-        if result and os.path.exists(temp_path):
-            results.append((temp_path, item))
-            print(f"已生成音频 {index+1}/{len(items)}: {item.get('text', '')[:20]}...")
+        if result is True and os.path.exists(temp_path):
+            results.append((temp_path, item_details)) # 保存路径和原始item信息
+            # print(f"已生成音频 {original_index + 1}/{len(items)}: {item_details.get('text', '')[:20]}...") # items在这里不可直接访问，用len(tasks)
+            print(f"已生成音频 {original_index + 1}/{len(tasks)}: {item_details.get('text', '')[:20]}...")
         else:
-            print(f"任务 {index+1} 生成失败")
+            print(f"任务 {original_index + 1} (文本: '{item_details.get('text', '')[:20]}...') 生成意外失败 (result: {result}, path_exists: {os.path.exists(temp_path)})")
     
     return results
 
