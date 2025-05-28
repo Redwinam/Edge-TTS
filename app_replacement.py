@@ -254,16 +254,20 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
         
         print(f"🚀 FFmpeg超高性能模式: 合并 {len(file_paths)} 个文件")
         
-        # 创建临时文件列表
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            filelist_path = f.name
-            for file_path in file_paths:
-                # ffmpeg concat需要特殊转义
-                escaped_path = file_path.replace("'", "'\"'\"'")
-                f.write(f"file '{escaped_path}'\n")
-                if silence_duration > 0:
-                    # 添加静音文件
-                    f.write(f"file 'pipe:0'\n")
+        # 验证所有文件是否存在
+        valid_files = []
+        for file_path in file_paths:
+            if os.path.exists(file_path):
+                valid_files.append(file_path)
+            else:
+                print(f"⚠️  文件不存在，跳过: {file_path}")
+        
+        if not valid_files:
+            print("❌ 没有有效的音频文件，回退到pydub方案")
+            return combine_audio_files(file_paths, output_path, silence_duration)
+        
+        if len(valid_files) != len(file_paths):
+            print(f"⚠️  {len(file_paths) - len(valid_files)} 个文件不存在，将使用 {len(valid_files)} 个有效文件")
         
         try:
             if silence_duration > 0:
@@ -271,15 +275,16 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
                 filter_parts = []
                 input_parts = []
                 
-                for i, file_path in enumerate(file_paths):
+                for i, file_path in enumerate(valid_files):
                     input_parts.extend(['-i', file_path])
                     filter_parts.append(f'[{i}:a]')
                     
-                    if i < len(file_paths) - 1:
-                        # 添加静音
-                        silence_filter = f'aevalsrc=0:duration={silence_duration/1000}:sample_rate=22050[silence{i}]'
-                        filter_parts.append(f'[silence{i}]')
+                    if i < len(valid_files) - 1:
+                        # 添加静音 - 为每个间隔创建独立的静音源
+                        silence_input_idx = len(valid_files) + i
+                        silence_filter = f'aevalsrc=0:duration={silence_duration/1000}:sample_rate=22050'
                         input_parts.extend(['-f', 'lavfi', '-i', silence_filter])
+                        filter_parts.append(f'[{silence_input_idx}:a]')
                 
                 # 构建concat filter
                 concat_filter = ''.join(filter_parts) + f'concat=n={len(filter_parts)}:v=0:a=1[out]'
@@ -295,6 +300,16 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
                 ]
             else:
                 # 方案2: 无静音间隔 - 使用concat demuxer（最快）
+                # 创建临时文件列表
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                    filelist_path = f.name
+                    for file_path in valid_files:
+                        # 使用绝对路径并进行适当的转义
+                        abs_path = os.path.abspath(file_path)
+                        # FFmpeg文件列表格式需要转义特殊字符
+                        escaped_path = abs_path.replace("'", r"\'").replace('"', r'\"')
+                        f.write(f"file '{escaped_path}'\n")
+                
                 cmd = [
                     'ffmpeg', '-y',
                     '-f', 'concat',
@@ -310,20 +325,34 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
             
             if result.returncode == 0:
                 processing_time = time.time() - start_time
-                avg_time_per_file = processing_time / len(file_paths)
-                print(f"✅ FFmpeg超高性能合并完成: {len(file_paths)} 个文件, 用时 {processing_time:.2f}s, 平均每文件 {avg_time_per_file:.3f}s")
+                avg_time_per_file = processing_time / len(valid_files)
+                print(f"✅ FFmpeg超高性能合并完成: {len(valid_files)} 个文件, 用时 {processing_time:.2f}s, 平均每文件 {avg_time_per_file:.3f}s")
                 return True
             else:
                 print(f"❌ FFmpeg合并失败: {result.stderr}")
+                print(f"🔧 FFmpeg命令: {' '.join(cmd)}")
+                
+                # 进行诊断测试
+                print("🔍 开始FFmpeg诊断...")
+                if silence_duration == 0 and len(valid_files) >= 2:
+                    # 测试前几个文件的合并
+                    test_files = valid_files[:min(3, len(valid_files))]
+                    test_result = test_ffmpeg_concat(test_files)
+                    if test_result:
+                        print("💡 FFmpeg基础功能正常，可能是文件数量或路径问题")
+                    else:
+                        print("💥 FFmpeg基础功能异常，建议重新安装FFmpeg")
+                
                 print("🔄 回退到pydub方案")
-                return combine_audio_files(file_paths, output_path, silence_duration)
+                return combine_audio_files(valid_files, output_path, silence_duration)
                 
         finally:
             # 清理临时文件
-            try:
-                os.unlink(filelist_path)
-            except:
-                pass
+            if silence_duration == 0 and 'filelist_path' in locals():
+                try:
+                    os.unlink(filelist_path)
+                except:
+                    pass
                 
     except Exception as e:
         print(f"FFmpeg合并出错: {e}, 回退到pydub方案")
@@ -376,7 +405,6 @@ async def generate_tts(text, output_path, voice, rate, volume, pitch):
 async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: str, pitch: str) -> List[Tuple[str, Dict]]:
     """批量并发生成TTS音频"""
     tasks = []
-    # temp_files 变量在此处未使用，可以考虑移除或后续用于其他逻辑
     
     for i, item in enumerate(items):
         text = item.get('text', '').strip()
@@ -400,7 +428,6 @@ async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: st
     
     # 使用 asyncio.gather 进行并发执行
     results = []
-    # tasks_to_gather = [t[0] for t in tasks] # 提取coroutine对象
     completed_tasks_results = await asyncio.gather(*[task_info[0] for task_info in tasks], return_exceptions=True)
     
     for i, task_info in enumerate(tasks):
@@ -409,16 +436,33 @@ async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: st
 
         if isinstance(result, Exception):
             # 增强日志：打印异常类型、repr和str
-            print(f"任务 {original_index + 1} (文本: '{item_details.get('text', '')[:20]}...') 失败. Type: {type(result)}, repr: {repr(result)}, str: {str(result)}")
+            print(f"❌ 任务 {original_index + 1} (文本: '{item_details.get('text', '')[:20]}...') 失败. Type: {type(result)}, repr: {repr(result)}, str: {str(result)}")
             continue
         
+        # 验证文件是否真正生成且有效
         if result is True and os.path.exists(temp_path):
-            results.append((temp_path, item_details)) # 保存路径和原始item信息
-            # print(f"已生成音频 {original_index + 1}/{len(items)}: {item_details.get('text', '')[:20]}...") # items在这里不可直接访问，用len(tasks)
-            print(f"已生成音频 {original_index + 1}/{len(tasks)}: {item_details.get('text', '')[:20]}...")
+            file_size = os.path.getsize(temp_path)
+            if file_size > 0:
+                results.append((temp_path, item_details)) # 保存路径和原始item信息
+                print(f"✅ 已生成音频 {original_index + 1}/{len(tasks)}: {item_details.get('text', '')[:20]}... (大小: {file_size} bytes)")
+            else:
+                print(f"⚠️  任务 {original_index + 1} 生成的文件为空: {temp_path}")
+                # 删除空文件
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
         else:
-            print(f"任务 {original_index + 1} (文本: '{item_details.get('text', '')[:20]}...') 生成意外失败 (result: {result}, path_exists: {os.path.exists(temp_path)})")
+            print(f"❌ 任务 {original_index + 1} (文本: '{item_details.get('text', '')[:20]}...') 生成失败 (result: {result}, path_exists: {os.path.exists(temp_path)})")
+            # 如果文件存在但结果不是True，也要删除这个可能损坏的文件
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                    print(f"🗑️  删除损坏的文件: {temp_path}")
+                except:
+                    pass
     
+    print(f"🎵 并发生成完成: 成功 {len(results)}/{len(tasks)} 个音频文件")
     return results
 
 @app.route('/synthesize', methods=['POST'])
@@ -922,12 +966,35 @@ def api_batch_tts():
             if not temp_files:
                 return jsonify({'error': '没有生成任何音频文件'}), 400
             
+            # 在合并前验证所有文件是否存在且有效
+            print(f"🔍 验证 {len(temp_files)} 个生成的音频文件...")
+            validated_files = []
+            for i, temp_file in enumerate(temp_files):
+                if os.path.exists(temp_file):
+                    file_size = os.path.getsize(temp_file)
+                    if file_size > 0:
+                        validated_files.append(temp_file)
+                        print(f"   ✅ 文件 {i+1}: {os.path.basename(temp_file)} (大小: {file_size} bytes)")
+                    else:
+                        print(f"   ⚠️  文件 {i+1} 为空，跳过: {temp_file}")
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                else:
+                    print(f"   ❌ 文件 {i+1} 不存在: {temp_file}")
+            
+            if not validated_files:
+                return jsonify({'error': '没有有效的音频文件可合并'}), 400
+            
+            print(f"📁 准备合并 {len(validated_files)}/{len(temp_files)} 个有效文件")
+            
             # 合并所有音频文件
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
-            success = combine_audio_files_ffmpeg(temp_files, output_path, silence_duration)
+            success = combine_audio_files_ffmpeg(validated_files, output_path, silence_duration)
             
             # 清理临时文件
-            for temp_file in temp_files:
+            for temp_file in validated_files:
                 try:
                     os.remove(temp_file)
                 except:
@@ -945,7 +1012,7 @@ def api_batch_tts():
                     'success': True,
                     'download_url': download_url,
                     'filename': output_name,
-                    'items_processed': len(temp_files)
+                    'items_processed': len(validated_files)
                 }
                 
                 # 可选性能信息（不影响原有前端解析）
@@ -954,14 +1021,14 @@ def api_batch_tts():
                     response_data['processing_mode'] = 'concurrent'
                     if generation_time > 0:
                         speedup_estimate = max(1.5, items_count * 0.8 / generation_time)
-                        response_data['performance_info'] = f"⚡ 并发处理 {len(temp_files)} 个音频文件，用时 {generation_time:.2f} 秒 (预估提速 {speedup_estimate:.1f}x)"
+                        response_data['performance_info'] = f"⚡ 并发处理 {len(validated_files)} 个音频文件，用时 {generation_time:.2f} 秒 (预估提速 {speedup_estimate:.1f}x)"
                 else:
                     response_data['processing_mode'] = 'serial'
                     response_data['generation_time'] = round(generation_time, 2)
                 
                 # 记录性能日志
-                avg_time_per_item = generation_time / len(temp_files) if temp_files else 0
-                print(f"✅ {processing_mode.upper()} 处理完成: {len(temp_files)} 项, 总用时 {generation_time:.2f}s, 平均每项 {avg_time_per_item:.2f}s")
+                avg_time_per_item = generation_time / len(validated_files) if validated_files else 0
+                print(f"✅ {processing_mode.upper()} 处理完成: {len(validated_files)} 项, 总用时 {generation_time:.2f}s, 平均每项 {avg_time_per_item:.2f}s")
                 
                 return jsonify(response_data)
             else:
@@ -973,8 +1040,12 @@ def api_batch_tts():
     except Exception as e:
         # 清理可能残留的临时文件
         try:
-            for temp_file in temp_files:
-                os.remove(temp_file)
+            if 'validated_files' in locals():
+                for temp_file in validated_files:
+                    os.remove(temp_file)
+            elif 'temp_files' in locals():
+                for temp_file in temp_files:
+                    os.remove(temp_file)
         except:
             pass
         return jsonify({'error': f'批量TTS处理失败: {str(e)}'}), 500
@@ -1126,8 +1197,12 @@ def api_batch_tts_with_timecodes():
     except Exception as e:
         # 清理可能残留的临时文件
         try:
-            for temp_file in temp_files:
-                os.remove(temp_file)
+            if 'validated_files' in locals():
+                for temp_file in validated_files:
+                    os.remove(temp_file)
+            elif 'temp_files' in locals():
+                for temp_file in temp_files:
+                    os.remove(temp_file)
         except:
             pass
         return jsonify({'error': f'批量TTS处理失败: {str(e)}'}), 500
@@ -1144,6 +1219,90 @@ def health_check():
         'cors_enabled': True,
         'max_concurrent_tasks': MAX_CONCURRENT_TASKS
     })
+
+def test_ffmpeg_concat(test_files=None):
+    """
+    测试FFmpeg的concat功能是否正常工作
+    用于诊断合并问题
+    """
+    if not test_files:
+        return True
+    
+    import tempfile
+    try:
+        print(f"🔍 测试FFmpeg concat功能，使用 {len(test_files)} 个文件...")
+        
+        # 验证所有测试文件是否存在
+        valid_files = []
+        for file_path in test_files:
+            if os.path.exists(file_path):
+                valid_files.append(file_path)
+                file_size = os.path.getsize(file_path)
+                print(f"   ✅ 文件存在: {os.path.basename(file_path)} (大小: {file_size} bytes)")
+            else:
+                print(f"   ❌ 文件不存在: {file_path}")
+        
+        if not valid_files:
+            print("❌ 没有有效的测试文件")
+            return False
+        
+        # 创建临时文件列表
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+            filelist_path = f.name
+            for file_path in valid_files:
+                abs_path = os.path.abspath(file_path)
+                escaped_path = abs_path.replace("'", r"\'").replace('"', r'\"')
+                f.write(f"file '{escaped_path}'\n")
+                print(f"   📝 添加到列表: {abs_path}")
+        
+        # 测试输出路径
+        test_output = os.path.join(app.config['UPLOAD_FOLDER'], f'ffmpeg_test_{uuid.uuid4()}.mp3')
+        
+        # 构建FFmpeg命令
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', filelist_path,
+            '-c:a', 'mp3',
+            '-b:a', '128k',
+            test_output
+        ]
+        
+        print(f"🔧 执行FFmpeg命令: {' '.join(cmd)}")
+        
+        # 执行命令
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        
+        # 清理临时文件列表
+        try:
+            os.unlink(filelist_path)
+        except:
+            pass
+        
+        if result.returncode == 0:
+            if os.path.exists(test_output):
+                output_size = os.path.getsize(test_output)
+                print(f"✅ FFmpeg concat测试成功！输出文件大小: {output_size} bytes")
+                # 清理测试输出文件
+                try:
+                    os.remove(test_output)
+                except:
+                    pass
+                return True
+            else:
+                print("❌ FFmpeg命令成功但没有生成输出文件")
+                return False
+        else:
+            print(f"❌ FFmpeg concat测试失败:")
+            print(f"   返回码: {result.returncode}")
+            print(f"   错误输出: {result.stderr}")
+            print(f"   标准输出: {result.stdout}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ FFmpeg测试异常: {e}")
+        return False
 
 if __name__ == '__main__':
     print("=" * 60)
