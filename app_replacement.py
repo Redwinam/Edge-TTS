@@ -19,6 +19,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 import aiofiles
 from typing import List, Dict, Tuple
+import subprocess
 
 app = Flask(__name__)
 # 简化CORS配置，只使用Flask-CORS来管理所有CORS设置
@@ -48,6 +49,22 @@ SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 print(f"🚀 TTS服务启动，智能并发处理已启用")
 print(f"📊 最大并发任务数: {MAX_CONCURRENT_TASKS}")
 print(f"🔧 可通过环境变量 MAX_CONCURRENT_TASKS 调整并发数")
+
+# 检查ffmpeg是否安装（用于超高性能音频合并）
+def check_ffmpeg():
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        print(f"✅ FFmpeg已安装，将使用超高性能音频合并模式")
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(f"⚠️  FFmpeg未安装，将使用pydub合并模式")
+        print(f"💡 安装FFmpeg可大幅提升音频合并性能，特别是处理大量文件时")
+        print(f"🍎 macOS安装命令: brew install ffmpeg")
+        print(f"🐧 Ubuntu安装命令: sudo apt install ffmpeg")
+        print(f"🪟 Windows: 从 https://ffmpeg.org/ 下载")
+        return False
+
+ffmpeg_available = check_ffmpeg()
 
 # 重试装饰器
 def async_retry(retries=3, delay=1):
@@ -218,6 +235,99 @@ class TTSCache:
 
 # 创建缓存管理器
 tts_cache = TTSCache(UPLOAD_FOLDER)
+
+def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
+    """
+    🚀 超高性能音频合并 - 使用ffmpeg原生合并（最快）
+    专为大量文件优化，在M3 Max上性能最佳
+    """
+    import tempfile
+    start_time = time.time()
+    
+    try:
+        # 检查ffmpeg是否可用
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("⚠️  ffmpeg未安装，回退到pydub方案")
+            return combine_audio_files(file_paths, output_path, silence_duration)
+        
+        print(f"🚀 FFmpeg超高性能模式: 合并 {len(file_paths)} 个文件")
+        
+        # 创建临时文件列表
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            filelist_path = f.name
+            for file_path in file_paths:
+                # ffmpeg concat需要特殊转义
+                escaped_path = file_path.replace("'", "'\"'\"'")
+                f.write(f"file '{escaped_path}'\n")
+                if silence_duration > 0:
+                    # 添加静音文件
+                    f.write(f"file 'pipe:0'\n")
+        
+        try:
+            if silence_duration > 0:
+                # 方案1: 有静音间隔 - 使用filter_complex（稍慢但灵活）
+                filter_parts = []
+                input_parts = []
+                
+                for i, file_path in enumerate(file_paths):
+                    input_parts.extend(['-i', file_path])
+                    filter_parts.append(f'[{i}:a]')
+                    
+                    if i < len(file_paths) - 1:
+                        # 添加静音
+                        silence_filter = f'aevalsrc=0:duration={silence_duration/1000}:sample_rate=22050[silence{i}]'
+                        filter_parts.append(f'[silence{i}]')
+                        input_parts.extend(['-f', 'lavfi', '-i', silence_filter])
+                
+                # 构建concat filter
+                concat_filter = ''.join(filter_parts) + f'concat=n={len(filter_parts)}:v=0:a=1[out]'
+                
+                cmd = [
+                    'ffmpeg', '-y',  # 覆盖输出文件
+                    *input_parts,
+                    '-filter_complex', concat_filter,
+                    '-map', '[out]',
+                    '-c:a', 'mp3',
+                    '-b:a', '128k',
+                    output_path
+                ]
+            else:
+                # 方案2: 无静音间隔 - 使用concat demuxer（最快）
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', filelist_path,
+                    '-c:a', 'mp3',
+                    '-b:a', '128k',
+                    output_path
+                ]
+            
+            # 执行ffmpeg命令
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                processing_time = time.time() - start_time
+                avg_time_per_file = processing_time / len(file_paths)
+                print(f"✅ FFmpeg超高性能合并完成: {len(file_paths)} 个文件, 用时 {processing_time:.2f}s, 平均每文件 {avg_time_per_file:.3f}s")
+                return True
+            else:
+                print(f"❌ FFmpeg合并失败: {result.stderr}")
+                print("🔄 回退到pydub方案")
+                return combine_audio_files(file_paths, output_path, silence_duration)
+                
+        finally:
+            # 清理临时文件
+            try:
+                os.unlink(filelist_path)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"FFmpeg合并出错: {e}, 回退到pydub方案")
+        return combine_audio_files(file_paths, output_path, silence_duration)
 
 @async_retry(retries=3, delay=2)
 async def generate_tts(text, output_path, voice, rate, volume, pitch):
@@ -441,27 +551,136 @@ def api_voices():
 @sync_retry(retries=2, delay=1)
 def combine_audio_files(file_paths, output_path, silence_duration=200):
     """
-    使用pydub合并音频文件（如果可用），否则使用简单方法
+    优化版音频合并函数 - 专为M3 Max等高性能芯片优化
+    🚀 支持多核并行处理、内存优化和智能批处理
     """
+    import time
+    start_time = time.time()
+    
     try:
-        # 尝试使用pydub进行专业合并
+        # 尝试使用pydub进行高性能合并
         try:
             from pydub import AudioSegment
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
             
-            combined = AudioSegment.empty()
-            silence = AudioSegment.silent(duration=silence_duration)  # 可配置的静音间隔
+            # 针对M3 Max优化的参数
+            cpu_count = mp.cpu_count()
+            chunk_size = max(10, len(file_paths) // (cpu_count * 2))  # 智能分块
             
-            for i, file_path in enumerate(file_paths):
-                audio = AudioSegment.from_mp3(file_path)
-                combined += audio
+            print(f"🚀 M3 Max优化模式启动: {len(file_paths)} 个文件, 使用 {cpu_count} 核心, 分块大小: {chunk_size}")
+            
+            # 策略1: 少量文件使用直接合并（最快）
+            if len(file_paths) <= 20:
+                print("📦 使用直接合并模式（文件数较少）")
+                combined = AudioSegment.empty()
+                silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
                 
-                # 在音频片段之间添加静音间隔（除了最后一个）
-                if i < len(file_paths) - 1:
-                    combined += silence
+                for i, file_path in enumerate(file_paths):
+                    audio = AudioSegment.from_mp3(file_path)
+                    combined += audio
+                    
+                    # 在音频片段之间添加静音间隔（除了最后一个）
+                    if silence and i < len(file_paths) - 1:
+                        combined += silence
+                
+                # 导出合并后的音频
+                combined.export(output_path, format="mp3", parameters=["-q:a", "2"])  # 高质量快速编码
+                
+            # 策略2: 中等数量文件使用分块合并
+            elif len(file_paths) <= 100:
+                print("⚡ 使用分块合并模式")
+                chunks = [file_paths[i:i + chunk_size] for i in range(0, len(file_paths), chunk_size)]
+                chunk_files = []
+                
+                # 并行处理每个分块
+                def process_chunk(chunk_data):
+                    chunk_idx, chunk_paths = chunk_data
+                    chunk_combined = AudioSegment.empty()
+                    silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
+                    
+                    for i, file_path in enumerate(chunk_paths):
+                        audio = AudioSegment.from_mp3(file_path)
+                        chunk_combined += audio
+                        if silence and i < len(chunk_paths) - 1:
+                            chunk_combined += silence
+                    
+                    # 保存临时分块文件
+                    chunk_file = f"{output_path}_chunk_{chunk_idx}.mp3"
+                    chunk_combined.export(chunk_file, format="mp3", parameters=["-q:a", "2"])
+                    return chunk_file
+                
+                # 使用线程池处理分块（I/O密集型）
+                with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as executor:
+                    chunk_files = list(executor.map(process_chunk, enumerate(chunks)))
+                
+                # 合并所有分块
+                final_combined = AudioSegment.empty()
+                silence_between_chunks = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
+                
+                for i, chunk_file in enumerate(chunk_files):
+                    chunk_audio = AudioSegment.from_mp3(chunk_file)
+                    final_combined += chunk_audio
+                    if silence_between_chunks and i < len(chunk_files) - 1:
+                        final_combined += silence_between_chunks
+                    
+                    # 立即删除临时文件以节省空间
+                    os.remove(chunk_file)
+                
+                final_combined.export(output_path, format="mp3", parameters=["-q:a", "2"])
+                
+            # 策略3: 大量文件使用高级分层合并
+            else:
+                print("🔥 使用高级分层合并模式（大量文件）")
+                
+                def merge_files_batch(file_batch, temp_output):
+                    """合并一批文件"""
+                    combined = AudioSegment.empty()
+                    silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
+                    
+                    for i, file_path in enumerate(file_batch):
+                        audio = AudioSegment.from_mp3(file_path)
+                        combined += audio
+                        if silence and i < len(file_batch) - 1:
+                            combined += silence
+                    
+                    combined.export(temp_output, format="mp3", parameters=["-q:a", "2"])
+                    return temp_output
+                
+                # 第一层：并行合并小批次
+                batch_size = 30  # 每批30个文件
+                batches = [file_paths[i:i + batch_size] for i in range(0, len(file_paths), batch_size)]
+                temp_files = []
+                
+                with ThreadPoolExecutor(max_workers=min(6, len(batches))) as executor:
+                    futures = []
+                    for i, batch in enumerate(batches):
+                        temp_file = f"{output_path}_temp_{i}.mp3"
+                        future = executor.submit(merge_files_batch, batch, temp_file)
+                        futures.append((future, temp_file))
+                    
+                    for future, temp_file in futures:
+                        future.result()  # 等待完成
+                        temp_files.append(temp_file)
+                
+                # 第二层：合并所有临时文件
+                final_combined = AudioSegment.empty()
+                silence_between_batches = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
+                
+                for i, temp_file in enumerate(temp_files):
+                    batch_audio = AudioSegment.from_mp3(temp_file)
+                    final_combined += batch_audio
+                    if silence_between_batches and i < len(temp_files) - 1:
+                        final_combined += silence_between_batches
+                    
+                    # 立即删除临时文件
+                    os.remove(temp_file)
+                
+                final_combined.export(output_path, format="mp3", parameters=["-q:a", "2"])
             
-            # 导出合并后的音频
-            combined.export(output_path, format="mp3")
-            print(f"使用pydub成功合并 {len(file_paths)} 个音频文件，静音间隔: {silence_duration}ms")
+            processing_time = time.time() - start_time
+            avg_time_per_file = processing_time / len(file_paths)
+            print(f"✅ M3 Max优化合并完成: {len(file_paths)} 个文件, 用时 {processing_time:.2f}s, 平均每文件 {avg_time_per_file:.3f}s")
             return True
             
         except ImportError:
@@ -472,7 +691,8 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                     with open(file_path, 'rb') as infile:
                         outfile.write(infile.read())
             
-            print(f"使用简单方法合并 {len(file_paths)} 个音频文件")
+            processing_time = time.time() - start_time
+            print(f"使用简单方法合并 {len(file_paths)} 个音频文件，用时 {processing_time:.2f}s")
             return True
             
     except Exception as e:
@@ -510,7 +730,7 @@ def api_combine_audio():
         
         # 合并音频文件
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
-        success = combine_audio_files(valid_files, output_path, 0)  # 使用200ms间隔
+        success = combine_audio_files_ffmpeg(valid_files, output_path, 0)  # 使用FFmpeg高性能合并
         
         if success:
             # 构建下载URL
@@ -704,7 +924,7 @@ def api_batch_tts():
             
             # 合并所有音频文件
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
-            success = combine_audio_files(temp_files, output_path, silence_duration)
+            success = combine_audio_files_ffmpeg(temp_files, output_path, silence_duration)
             
             # 清理临时文件
             for temp_file in temp_files:
@@ -867,7 +1087,7 @@ def api_batch_tts_with_timecodes():
             
             # 合并所有音频文件
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
-            success = combine_audio_files(temp_files, output_path, silence_duration)
+            success = combine_audio_files_ffmpeg(temp_files, output_path, silence_duration)
             
             # 清理临时文件
             for temp_file in temp_files:
