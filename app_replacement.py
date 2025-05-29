@@ -26,7 +26,7 @@ app = Flask(__name__)
 CORS(app, 
      origins=["*"],  # 改为数组格式
      methods=["GET", "POST", "OPTIONS", "HEAD"],
-     allow_headers=["Content-Type", "Authorization", "Range", "Accept", "Accept-Encoding", "Accept-Language"],
+     allow_headers=["Content-Type", "Authorization", "Range", "Accept", "Accept-Encoding", "Accept-Language", "Cache-Control", "Pragma", "Expires"],
      expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Type"],
      supports_credentials=False,
      max_age=86400
