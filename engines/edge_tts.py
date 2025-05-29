@@ -68,6 +68,12 @@ class EdgeTTSEngine(TTSEngine):
     async def synthesize_to_file(self, text: str, output_path: str, voice: str, **kwargs) -> bool:
         """合成语音并保存到文件"""
         try:
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                print(f"📁 创建目录: {output_dir}")
+                
             rate = kwargs.get('rate', '+0%')
             volume = kwargs.get('volume', '+0%')
             pitch = kwargs.get('pitch', '+0Hz')

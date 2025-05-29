@@ -163,6 +163,12 @@ class AzureTTSEngine(TTSEngine):
     async def synthesize_to_file(self, text: str, output_path: str, voice: str, **kwargs) -> bool:
         """合成语音并保存到文件"""
         try:
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                print(f"📁 创建目录: {output_dir}")
+            
             audio_data = await self.synthesize(text, voice, **kwargs)
             
             # 检查输出格式，如果需要WAV格式则转换

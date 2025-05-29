@@ -103,6 +103,57 @@ def show_config_info():
     print(f"   • 并发任务: {os.environ.get('MAX_CONCURRENT_TASKS', '10')}")
     print(f"   • Azure区域: {os.environ.get('AZURE_SPEECH_REGION', 'eastasia')}")
 
+def start_server():
+    """启动TTS服务器"""
+    try:
+        # 导入Flask应用
+        import app
+        from config import FLASK_CONFIG
+        
+        print("\n" + "=" * 60)
+        print("🎵 TTS 智能服务 v3.0 (重构版)")
+        print("=" * 60)
+        print("✨ 特性:")
+        print("   🔵 默认使用Azure TTS")
+        print("   🟢 保留Edge TTS作为备选")
+        print("   📱 完全兼容原有API")
+        print("   ⚡ 智能并发处理")
+        print("   🎯 自动故障转移")
+        print("   💾 智能缓存系统")
+        print("   🏗️  模块化架构设计")
+        print("   🌐 支持跨域访问 (CORS)")
+        print("   🎵 支持MP3和WAV格式")
+        print()
+        
+        # 显示当前引擎信息
+        engine_info = app.tts_service.get_current_engine_info()
+        print(f"🎯 当前引擎: {engine_info.get('name', 'unknown')}")
+        print(f"📊 可用引擎: {', '.join(engine_info.get('available_engines', []))}")
+        print()
+        
+        print(f"🌐 服务地址: http://localhost:{FLASK_CONFIG['port']}")
+        print(f"🎧 音频URL: http://localhost:{FLASK_CONFIG['port']}/static/audio/<filename>")
+        print("🛑 停止服务: 按 Ctrl+C")
+        print("=" * 60)
+        
+        # 启动Flask应用
+        app.app.run(
+            debug=FLASK_CONFIG['debug'], 
+            host=FLASK_CONFIG['host'], 
+            port=FLASK_CONFIG['port']
+        )
+        
+    except ImportError as e:
+        print(f"❌ 启动失败: {e}")
+        print("请确保所有模块文件都在正确位置")
+        return 1
+    except KeyboardInterrupt:
+        print("\n🛑 服务已停止")
+        return 0
+    except Exception as e:
+        print(f"❌ 服务运行异常: {e}")
+        return 1
+
 def main():
     print("🚀 TTS服务启动中...")
     print("=" * 50)
@@ -127,13 +178,8 @@ def main():
     print("🛑 停止服务: 按 Ctrl+C")
     print("=" * 50)
     
-    # 启动服务
-    try:
-        import app
-    except ImportError as e:
-        print(f"❌ 启动失败: {e}")
-        print("请确保所有模块文件都在正确位置")
-        return 1
+    # 启动服务器
+    return start_server()
 
 if __name__ == "__main__":
     sys.exit(main()) 

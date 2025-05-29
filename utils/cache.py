@@ -35,6 +35,12 @@ class TTSCache:
     async def copy_from_cache(self, cache_key: str, output_path: str) -> bool:
         """从缓存复制文件"""
         try:
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                print(f"📁 创建输出目录: {output_dir}")
+            
             # 从输出路径推断格式
             output_ext = os.path.splitext(output_path)[1].lower()
             audio_format = "wav" if output_ext == ".wav" else "mp3"
@@ -57,6 +63,11 @@ class TTSCache:
     async def save_to_cache(self, cache_key: str, source_path: str):
         """保存到缓存"""
         try:
+            # 确保缓存目录存在
+            if not os.path.exists(self.cache_dir):
+                os.makedirs(self.cache_dir, exist_ok=True)
+                print(f"📁 创建缓存目录: {self.cache_dir}")
+            
             # 从源文件路径推断格式
             source_ext = os.path.splitext(source_path)[1].lower()
             audio_format = "wav" if source_ext == ".wav" else "mp3"
