@@ -107,7 +107,7 @@ class TTSService:
     @async_retry(retries=3, delay=2)
     async def synthesize_single(self, text: str, output_path: str, voice: str, 
                                rate: str, volume: str, pitch: str, 
-                               max_concurrent=None, audio_format="wav") -> bool:
+                               max_concurrent=None, audio_format="mp3") -> bool:
         """合成单个TTS音频"""
         async with self.get_semaphore(max_concurrent):
             # 检查缓存
@@ -156,7 +156,7 @@ class TTSService:
     
     async def batch_synthesize_concurrent(self, items: List[Dict], rate: str, volume: str, 
                                         pitch: str, max_concurrent=None, 
-                                        audio_format="wav") -> List[Tuple[str, Dict]]:
+                                        audio_format="mp3") -> List[Tuple[str, Dict]]:
         """批量并发合成TTS音频"""
         tasks = []
         
@@ -305,7 +305,7 @@ class TTSService:
                                silence_duration: int = 200, 
                                use_concurrent: bool = True,
                                max_concurrent: Optional[int] = None,
-                               audio_format: str = "wav") -> Dict[str, Any]:
+                               audio_format: str = "mp3") -> Dict[str, Any]:
         """批量创建音频并合并"""
         start_time = time.time()
         original_items_count = len(items)
@@ -382,7 +382,7 @@ class TTSService:
         }
     
     async def _batch_synthesize_serial(self, items: List[Dict], rate: str, volume: str, 
-                                     pitch: str, audio_format: str = "wav") -> List[str]:
+                                     pitch: str, audio_format: str = "mp3") -> List[str]:
         """串行批量合成"""
         temp_files = []
         

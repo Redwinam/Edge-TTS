@@ -65,12 +65,13 @@ def synthesize():
     rate = request.form.get('rate', '+0%')
     volume = request.form.get('volume', '+0%')
     pitch = request.form.get('pitch', '+0Hz')
+    audio_format_to_use = TTS_CONFIG.get('default_format', 'mp3') # 使用配置的默认格式
     
     if not text:
         return jsonify({'error': '请输入文本'}), 400
     
     # 生成唯一的文件名
-    filename = f"{uuid.uuid4()}.wav"
+    filename = f"{uuid.uuid4()}.{audio_format_to_use}" # 使用实际格式作为扩展名
     output_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     
     # 执行异步任务
@@ -78,7 +79,7 @@ def synthesize():
     asyncio.set_event_loop(loop)
     try:
         success = loop.run_until_complete(
-            tts_service.synthesize_single(text, output_path, voice, rate, volume, pitch, None, "wav")
+            tts_service.synthesize_single(text, output_path, voice, rate, volume, pitch, None, audio_format_to_use)
         )
         if success:
             audio_url = f"/static/audio/{filename}"
@@ -99,6 +100,7 @@ def api_tts():
     """
     try:
         data = request.get_json()
+        default_audio_format = TTS_CONFIG.get('default_format', 'mp3') # 从配置获取默认格式
         if not data:
             # 尝试从表单数据获取
             text = request.form.get('text', '')
@@ -107,7 +109,7 @@ def api_tts():
             volume = request.form.get('volume', '+0%')
             pitch = request.form.get('pitch', '+0Hz')
             return_type = request.form.get('return_type', 'url')
-            audio_format = request.form.get('audio_format', 'wav').lower()
+            audio_format = request.form.get('audio_format', default_audio_format).lower()
         else:
             text = data.get('text', '')
             voice = data.get('voice', TTS_CONFIG.get('default_voice', 'zh-CN-XiaoxiaoNeural'))
@@ -115,7 +117,7 @@ def api_tts():
             volume = data.get('volume', '+0%')
             pitch = data.get('pitch', '+0Hz')
             return_type = data.get('return_type', 'url')
-            audio_format = data.get('audio_format', 'wav').lower()
+            audio_format = data.get('audio_format', default_audio_format).lower()
         
         if not text:
             return jsonify({'error': '请提供文本'}), 400
@@ -206,13 +208,16 @@ def api_batch_tts():
         if not data or 'items' not in data:
             return jsonify({'error': '请提供TTS项目列表'}), 400
         
+        default_audio_format = TTS_CONFIG.get('default_format', 'mp3') # 从配置获取默认格式
         items = data.get('items', [])
-        output_name = data.get('output_name', f'batch_tts_{uuid.uuid4()}.wav')
+        # 默认输出文件名后缀应与默认格式一致
+        output_name_default = f'batch_tts_{{uuid.uuid4()}}.{default_audio_format}'
+        output_name = data.get('output_name', output_name_default)
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
         silence_duration = data.get('silence_duration', 200)
-        audio_format = data.get('audio_format', 'wav').lower()
+        audio_format = data.get('audio_format', default_audio_format).lower()
         
         # 智能模式参数
         use_concurrent = data.get('use_concurrent', True)
@@ -305,14 +310,17 @@ def api_batch_tts_with_timecodes():
         if not data or 'items' not in data:
             return jsonify({'error': '请提供TTS项目列表'}), 400
         
+        default_audio_format = TTS_CONFIG.get('default_format', 'mp3') # 从配置获取默认格式
         items = data.get('items', [])
-        output_name = data.get('output_name', f'batch_tts_{uuid.uuid4()}.wav')
+        # 默认输出文件名后缀应与默认格式一致
+        output_name_default = f'batch_tts_{{uuid.uuid4()}}.{default_audio_format}'
+        output_name = data.get('output_name', output_name_default)
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
         silence_duration = data.get('silence_duration', 200)
         use_concurrent = data.get('use_concurrent', True)
-        audio_format = data.get('audio_format', 'wav').lower()
+        audio_format = data.get('audio_format', default_audio_format).lower()
         
         if not items:
             return jsonify({'error': 'TTS项目列表不能为空'}), 400

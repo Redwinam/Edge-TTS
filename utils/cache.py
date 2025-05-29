@@ -17,17 +17,17 @@ class TTSCache:
         os.makedirs(cache_dir, exist_ok=True)
         
     def get_cache_key(self, text: str, voice: str, rate: str, volume: str, 
-                     pitch: str, audio_format: str = "wav") -> str:
+                     pitch: str, audio_format: str = "mp3") -> str:
         """生成缓存键"""
         cache_key_str = f"{text}-{voice}-{rate}-{volume}-{pitch}-{audio_format}"
         return hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
     
-    def get_cache_path(self, cache_key: str, audio_format: str = "wav") -> str:
+    def get_cache_path(self, cache_key: str, audio_format: str = "mp3") -> str:
         """获取缓存文件路径"""
         file_ext = "wav" if audio_format.lower() == "wav" else "mp3"
         return os.path.join(self.cache_dir, f"cache_{cache_key}.{file_ext}")
     
-    def is_cached(self, cache_key: str, audio_format: str = "wav") -> bool:
+    def is_cached(self, cache_key: str, audio_format: str = "mp3") -> bool:
         """检查是否有缓存"""
         cache_path = self.get_cache_path(cache_key, audio_format)
         return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0

@@ -28,7 +28,7 @@ TTS_CONFIG = {
     'cache_enabled': True,
     'cache_dir': 'static/audio',
     'supported_formats': ['mp3', 'wav'],
-    'default_format': 'wav'
+    'default_format': 'mp3'
 }
 
 # ===== Flask应用配置 =====
