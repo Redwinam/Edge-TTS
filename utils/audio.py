@@ -83,6 +83,7 @@ class AudioProcessor:
     def _run_ffmpeg_combine(self, valid_files: List[str], output_path: str, 
                           silence_duration: int, codec_settings: List[str]) -> bool:
         """在线程中运行FFmpeg合并"""
+        target_sample_rate = 48000 # 目标采样率
         try:
             if silence_duration > 0:
                 # 有静音间隔的合并
@@ -91,12 +92,13 @@ class AudioProcessor:
                 
                 for i, file_path in enumerate(valid_files):
                     input_parts.extend(['-i', file_path])
-                    filter_parts.append(f'[{i}:a]')
+                    filter_parts.append(f'[{i}:a]aresample={target_sample_rate}') # 确保输入被重采样到目标采样率
                     
                     if i < len(valid_files) - 1:
                         silence_input_idx = len(valid_files) + i
-                        silence_filter = f'aevalsrc=0:duration={silence_duration/1000}:sample_rate=22050'
-                        input_parts.extend(['-f', 'lavfi', '-i', silence_filter])
+                        # 使用目标采样率生成静音
+                        silence_filter_str = f'aevalsrc=0:duration={silence_duration/1000}:sample_rate={target_sample_rate}'
+                        input_parts.extend(['-f', 'lavfi', '-i', silence_filter_str])
                         filter_parts.append(f'[{silence_input_idx}:a]')
                 
                 concat_filter = ''.join(filter_parts) + f'concat=n={len(filter_parts)}:v=0:a=1[out]'
@@ -106,16 +108,24 @@ class AudioProcessor:
                     *input_parts,
                     '-filter_complex', concat_filter,
                     '-map', '[out]',
+                    '-ar', str(target_sample_rate), # 确保输出采样率
                     *codec_settings,
                     output_path
                 ]
             else:
                 # 无静音间隔的合并
+                # 对于concat demuxer，FFmpeg通常会尝试使用第一个输入的参数。
+                # 为了确保48kHz，我们可以对每个输入进行预处理或在filter_complex中处理，
+                # 但更简单的方式是确保所有输入片段已经是48kHz。
+                # 如果之前的步骤已确保所有片段为48kHz WAV，此处的concat应该能正确工作。
+                # 我们也可以在最后加 -ar 48000 强制输出采样率
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
                     filelist_path = f.name
                     for file_path in valid_files:
                         abs_path = os.path.abspath(file_path)
                         escaped_path = abs_path.replace("'", r"\'").replace('"', r'\"')
+                        # FFmpeg的concat demuxer需要文件路径。如果文件本身不是48kHz，这里不会自动转换。
+                        # 假设上游缓存的文件已经是48kHz。
                         f.write(f"file '{escaped_path}'\n")
                 
                 cmd = [
@@ -123,6 +133,7 @@ class AudioProcessor:
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', filelist_path,
+                    '-ar', str(target_sample_rate), # 强制输出采样率为48000Hz
                     *codec_settings,
                     output_path
                 ]

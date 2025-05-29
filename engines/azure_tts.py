@@ -135,6 +135,17 @@ class AzureTTSEngine(TTSEngine):
         try:
             token = await self._get_access_token()
             
+            # 从kwargs获取期望的音频格式，默认为wav
+            requested_format = kwargs.get('audio_format_preference', 'wav').lower()
+            
+            output_format_header = ''
+            if requested_format == 'wav':
+                output_format_header = 'riff-48khz-16bit-mono-pcm' # 优先请求高质量WAV
+            elif requested_format == 'mp3':
+                output_format_header = 'audio-48khz-192kbitrate-mono-mp3' # 高质量MP3
+            else: # 默认或未知格式，回退到之前的值或一个通用值
+                output_format_header = 'riff-24khz-16bit-mono-pcm' # 或者 Azure 支持的通用高质量WAV
+
             # 构建SSML
             ssml = self._build_ssml(text, voice, **kwargs)
             
@@ -143,7 +154,7 @@ class AzureTTSEngine(TTSEngine):
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/ssml+xml',
-                'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3'  # 高质量MP3
+                'X-Microsoft-OutputFormat': output_format_header
             }
             
             async with aiohttp.ClientSession() as session:
@@ -169,47 +180,42 @@ class AzureTTSEngine(TTSEngine):
                 os.makedirs(output_dir, exist_ok=True)
                 print(f"📁 创建目录: {output_dir}")
             
-            audio_data = await self.synthesize(text, voice, **kwargs)
+            # 获取最终希望保存的文件格式 (e.g. "wav" or "mp3")
+            # 这个 audio_format 来自 tts_service.py 的调用
+            final_save_format = kwargs.get('audio_format', 'wav').lower() # 保持与 tts_service.py 的默认一致
+
+            # 将此期望格式传递给 synthesize 方法，让它从 Azure 获取最接近的格式
+            # 'audio_format_preference' 是我们向 synthesize 方法传递的参数
+            audio_data = await self.synthesize(text, voice, audio_format_preference=final_save_format, **kwargs)
             
-            # 检查输出格式，如果需要WAV格式则转换
-            audio_format = kwargs.get('audio_format', 'mp3').lower()
+            # 此处，audio_data 理论上已经是 final_save_format (或Azure支持的最优格式)
+            # 如果 synthesize 成功获取了 riff-48khz-16bit-mono-pcm (当 final_save_format 是 'wav')
+            # 或 audio-48khz-192kbitrate-mono-mp3 (当 final_save_format 是 'mp3')
+            # 那么就不再需要 pydub 进行格式转换了。
+
+            # 直接保存获取到的音频数据
+            with open(output_path, 'wb') as f:
+                f.write(audio_data)
             
-            if audio_format == 'wav':
-                # 需要转换为WAV格式
-                try:
-                    from pydub import AudioSegment
-                    import tempfile
-                    
-                    # 先保存为临时MP3文件
-                    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_file:
-                        temp_file.write(audio_data)
-                        temp_mp3_path = temp_file.name
-                    
-                    # 转换为WAV
-                    audio = AudioSegment.from_mp3(temp_mp3_path)
-                    audio.export(output_path, format="wav")
-                    
-                    # 清理临时文件
-                    os.remove(temp_mp3_path)
-                    print(f"🔵 已转换为WAV格式: {output_path}")
-                    
-                except ImportError:
-                    print("⚠️  pydub未安装，无法转换为WAV格式，保持MP3格式")
-                    with open(output_path, 'wb') as f:
-                        f.write(audio_data)
-                except Exception as e:
-                    print(f"⚠️  WAV转换失败: {e}，保持MP3格式")
-                    with open(output_path, 'wb') as f:
-                        f.write(audio_data)
+            # 验证文件大小和内容（可选，但推荐）
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                print(f"🔵 Azure TTS文件直接保存成功: {output_path} (格式: {final_save_format})")
+                return True
             else:
-                # 直接保存MP3格式
-                with open(output_path, 'wb') as f:
-                    f.write(audio_data)
-            
-            return True
+                print(f"⚠️  Azure TTS文件保存后为空或不存在: {output_path}")
+                # 可以尝试删除空文件
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                return False
             
         except Exception as e:
-            print(f"❌ Azure TTS文件保存失败: {e}")
+            print(f"❌ Azure TTS文件保存或获取失败: {e}")
+            # 确保如果发生错误，清理可能创建的空文件或不完整文件
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass # 可能文件未被创建或已被删除
             return False
     
     def _build_ssml(self, text: str, voice: str, **kwargs) -> str:
