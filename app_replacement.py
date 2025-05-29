@@ -251,17 +251,20 @@ class TTSCache:
         try:
             cache_path = self.get_cache_path(cache_key)
             shutil.copyfile(source_path, cache_path)
-            print(f"已缓存新文件: cache_{cache_key[:8]}...mp3")
+            # 从源文件路径获取实际的文件扩展名
+            file_ext = os.path.splitext(source_path)[1] or '.mp3'
+            print(f"已缓存新文件: cache_{cache_key[:8]}...{file_ext}")
         except Exception as e:
             print(f"保存到缓存失败: {e}")
 
 # 创建缓存管理器
 tts_cache = TTSCache(UPLOAD_FOLDER)
 
-def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
+def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200, audio_format="wav"):
     """
     🚀 超高性能音频合并 - 使用ffmpeg原生合并（最快）
     专为大量文件优化，在M3 Max上性能最佳
+    支持MP3和WAV格式
     """
     import tempfile
     start_time = time.time()
@@ -272,9 +275,9 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
             subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("⚠️  ffmpeg未安装，回退到pydub方案")
-            return combine_audio_files(file_paths, output_path, silence_duration)
+            return combine_audio_files(file_paths, output_path, silence_duration, audio_format)
         
-        print(f"🚀 FFmpeg超高性能模式: 合并 {len(file_paths)} 个文件")
+        print(f"🚀 FFmpeg超高性能模式: 合并 {len(file_paths)} 个文件 (格式: {audio_format})")
         
         # 验证所有文件是否存在
         valid_files = []
@@ -286,12 +289,20 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
         
         if not valid_files:
             print("❌ 没有有效的音频文件，回退到pydub方案")
-            return combine_audio_files(file_paths, output_path, silence_duration)
+            return combine_audio_files(file_paths, output_path, silence_duration, audio_format)
         
         if len(valid_files) != len(file_paths):
             print(f"⚠️  {len(file_paths) - len(valid_files)} 个文件不存在，将使用 {len(valid_files)} 个有效文件")
         
         try:
+            # 确定输出编码设置
+            if audio_format.lower() == "wav":
+                codec_settings = ['-c:a', 'pcm_s16le']  # WAV格式使用PCM编码
+                print("📊 使用WAV格式输出 (PCM 16-bit)")
+            else:
+                codec_settings = ['-c:a', 'mp3', '-b:a', '128k']  # MP3格式
+                print("📊 使用MP3格式输出 (128kbps)")
+            
             if silence_duration > 0:
                 # 方案1: 有静音间隔 - 使用filter_complex（稍慢但灵活）
                 filter_parts = []
@@ -316,8 +327,7 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
                     *input_parts,
                     '-filter_complex', concat_filter,
                     '-map', '[out]',
-                    '-c:a', 'mp3',
-                    '-b:a', '128k',
+                    *codec_settings,
                     output_path
                 ]
             else:
@@ -337,8 +347,7 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', filelist_path,
-                    '-c:a', 'mp3',
-                    '-b:a', '128k',
+                    *codec_settings,
                     output_path
                 ]
             
@@ -366,7 +375,7 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
                         print("💥 FFmpeg基础功能异常，建议重新安装FFmpeg")
                 
                 print("🔄 回退到pydub方案")
-                return combine_audio_files(valid_files, output_path, silence_duration)
+                return combine_audio_files(valid_files, output_path, silence_duration, audio_format)
                 
         finally:
             # 清理临时文件
@@ -378,21 +387,22 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
                 
     except Exception as e:
         print(f"FFmpeg合并出错: {e}, 回退到pydub方案")
-        return combine_audio_files(file_paths, output_path, silence_duration)
+        return combine_audio_files(file_paths, output_path, silence_duration, audio_format)
 
 @async_retry(retries=3, delay=2)
-async def generate_tts(text, output_path, voice, rate, volume, pitch, max_concurrent=None):
-    """优化的TTS生成函数（与原版接口完全兼容）"""
+async def generate_tts(text, output_path, voice, rate, volume, pitch, max_concurrent=None, audio_format="wav"):
+    """优化的TTS生成函数（支持多种音频格式）"""
     async with get_semaphore(max_concurrent):  # 限制并发数量
-        # --- 缓存逻辑开始（与原版一致）---
-        # 1. 构建缓存键字符串，包含所有影响语音输出的参数
-        cache_key_str = f"{text}-{voice}-{rate}-{volume}-{pitch}"
+        # --- 缓存逻辑开始（包含格式信息）---
+        # 1. 构建缓存键字符串，包含所有影响语音输出的参数（包括格式）
+        cache_key_str = f"{text}-{voice}-{rate}-{volume}-{pitch}-{audio_format}"
         
         # 2. 为缓存键生成MD5哈希值
         file_hash = hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
         
-        # 3. 构造缓存文件名和路径
-        cached_filename = f"cache_{file_hash}.mp3"
+        # 3. 构造缓存文件名和路径（使用指定格式）
+        file_extension = "wav" if audio_format.lower() == "wav" else "mp3"
+        cached_filename = f"cache_{file_hash}.{file_extension}"
         cached_file_path = os.path.join(app.config['UPLOAD_FOLDER'], cached_filename)
         
         # 4. 检查缓存文件是否存在
@@ -406,12 +416,37 @@ async def generate_tts(text, output_path, voice, rate, volume, pitch, max_concur
                 print(f"从缓存复制文件失败: {e}，将重新生成。")
                 # 如果复制失败，则继续执行生成逻辑
 
-        print(f"缓存未命中: {cached_filename}，生成新文件: {text[:30]}...")
+        print(f"缓存未命中: {cached_filename}，生成新文件: {text[:30]}... (格式: {audio_format})")
         # --- 缓存逻辑结束 ---
         
         # 如果缓存未命中或复制缓存失败，则正常生成TTS
-        communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
-        await communicate.save(output_path)
+        # 根据格式选择输出方式
+        if audio_format.lower() == "wav":
+            # 生成WAV格式
+            communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
+            # 先生成为MP3格式，然后转换为WAV
+            temp_mp3_path = output_path.replace('.wav', '_temp.mp3')
+            await communicate.save(temp_mp3_path)
+            
+            # 使用pydub转换为WAV格式
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_mp3(temp_mp3_path)
+                audio.export(output_path, format="wav")
+                # 删除临时MP3文件
+                os.remove(temp_mp3_path)
+                print(f"✅ 已转换为WAV格式: {os.path.basename(output_path)}")
+            except ImportError:
+                print("⚠️  pydub未安装，无法转换为WAV格式，保持MP3格式")
+                shutil.move(temp_mp3_path, output_path)
+            except Exception as e:
+                print(f"⚠️  WAV转换失败: {e}，保持MP3格式")
+                if os.path.exists(temp_mp3_path):
+                    shutil.move(temp_mp3_path, output_path)
+        else:
+            # 生成MP3格式（原有逻辑）
+            communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
+            await communicate.save(output_path)
         
         # --- 缓存保存逻辑 ---
         # 生成成功后，将新文件复制到缓存位置
@@ -424,7 +459,7 @@ async def generate_tts(text, output_path, voice, rate, volume, pitch, max_concur
         return True # 明确返回True
 
 # 批量并发生成TTS
-async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: str, pitch: str, max_concurrent=None) -> List[Tuple[str, Dict]]:
+async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: str, pitch: str, max_concurrent=None, audio_format="wav") -> List[Tuple[str, Dict]]:
     """批量并发生成TTS音频"""
     tasks = []
     
@@ -439,11 +474,11 @@ async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: st
         item_pitch = item.get('pitch', pitch)
         
         # 生成临时文件名
-        temp_filename = f"batch_{uuid.uuid4()}.mp3"
+        temp_filename = f"batch_{uuid.uuid4()}.{audio_format}"
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
         
         # 创建异步任务，传递自定义并发数
-        task = generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch, max_concurrent)
+        task = generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch, max_concurrent, audio_format)
         tasks.append((task, temp_path, item, i)) # item 和 i 用于结果匹配
     
     print(f"开始智能并发生成 {len(tasks)} 个TTS音频...")
@@ -499,7 +534,7 @@ def synthesize():
         return jsonify({'error': '请输入文本'}), 400
     
     # 生成唯一的文件名
-    filename = f"{uuid.uuid4()}.mp3"
+    filename = f"{uuid.uuid4()}.wav"
     output_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     
     # 执行异步任务
@@ -520,6 +555,7 @@ def api_tts():
     """
     API端点，接收JSON格式的请求，包含要转换的文本和语音参数
     返回生成的音频URL或直接返回音频流
+    支持MP3和WAV格式
     """
     try:
         data = request.get_json()
@@ -531,6 +567,7 @@ def api_tts():
             volume = request.form.get('volume', '+0%')
             pitch = request.form.get('pitch', '+0Hz')
             return_type = request.form.get('return_type', 'url')  # url 或 audio
+            audio_format = request.form.get('audio_format', 'wav').lower()  # 新增格式支持
         else:
             text = data.get('text', '')
             voice = data.get('voice', DEFAULT_VOICE)
@@ -538,25 +575,34 @@ def api_tts():
             volume = data.get('volume', '+0%')
             pitch = data.get('pitch', '+0Hz')
             return_type = data.get('return_type', 'url')  # url 或 audio
+            audio_format = data.get('audio_format', 'wav').lower()  # 新增格式支持
         
         if not text:
             return jsonify({'error': '请提供文本'}), 400
 
-        # 生成唯一的文件名
-        filename = f"{uuid.uuid4()}.mp3"
+        # 验证音频格式
+        if audio_format not in ['mp3', 'wav']:
+            return jsonify({'error': '支持的音频格式: mp3, wav'}), 400
+
+        # 生成唯一的文件名（使用指定格式）
+        file_ext = "wav" if audio_format == "wav" else "mp3"
+        filename = f"{uuid.uuid4()}.{file_ext}"
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         
         # 执行异步任务
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(generate_tts(text, output_path, voice, rate, volume, pitch))
+            loop.run_until_complete(generate_tts(text, output_path, voice, rate, volume, pitch, None, audio_format))
             
             if return_type == 'audio':
                 # 直接返回音频文件
                 with open(output_path, 'rb') as audio_file:
                     audio_data = audio_file.read()
-                return Response(audio_data, mimetype='audio/mpeg')
+                
+                # 根据格式设置正确的MIME类型
+                mime_type = 'audio/wav' if audio_format == 'wav' else 'audio/mpeg'
+                return Response(audio_data, mimetype=mime_type)
             else:
                 # 返回音频URL
                 # 构建完整URL（包括主机名）
@@ -565,7 +611,8 @@ def api_tts():
                 return jsonify({
                     'success': True, 
                     'audio_url': audio_url,
-                    'filename': filename
+                    'filename': filename,
+                    'audio_format': audio_format
                 })
         except Exception as e:
             return jsonify({'error': f'生成失败: {str(e)}'}), 500
@@ -615,10 +662,11 @@ def api_voices():
         loop.close()
 
 @sync_retry(retries=2, delay=1)
-def combine_audio_files(file_paths, output_path, silence_duration=200):
+def combine_audio_files(file_paths, output_path, silence_duration=200, audio_format="wav"):
     """
     优化版音频合并函数 - 专为M3 Max等高性能芯片优化
     🚀 支持多核并行处理、内存优化和智能批处理
+    支持MP3和WAV格式
     """
     import time
     start_time = time.time()
@@ -634,7 +682,17 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
             cpu_count = mp.cpu_count()
             chunk_size = max(10, len(file_paths) // (cpu_count * 2))  # 智能分块
             
-            print(f"🚀 M3 Max优化模式启动: {len(file_paths)} 个文件, 使用 {cpu_count} 核心, 分块大小: {chunk_size}")
+            print(f"🚀 M3 Max优化模式启动: {len(file_paths)} 个文件, 使用 {cpu_count} 核心, 分块大小: {chunk_size} (格式: {audio_format})")
+            
+            # 确定音频格式加载函数
+            if audio_format.lower() == "wav":
+                audio_loader = AudioSegment.from_wav
+                export_format = "wav"
+                export_params = {"parameters": ["-acodec", "pcm_s16le"]}  # 16-bit PCM
+            else:
+                audio_loader = AudioSegment.from_mp3
+                export_format = "mp3" 
+                export_params = {"parameters": ["-q:a", "2"]}  # 高质量快速编码
             
             # 策略1: 少量文件使用直接合并（最快）
             if len(file_paths) <= 20:
@@ -643,7 +701,7 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                 silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
                 
                 for i, file_path in enumerate(file_paths):
-                    audio = AudioSegment.from_mp3(file_path)
+                    audio = audio_loader(file_path)
                     combined += audio
                     
                     # 在音频片段之间添加静音间隔（除了最后一个）
@@ -651,7 +709,7 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                         combined += silence
                 
                 # 导出合并后的音频
-                combined.export(output_path, format="mp3", parameters=["-q:a", "2"])  # 高质量快速编码
+                combined.export(output_path, format=export_format, **export_params)
                 
             # 策略2: 中等数量文件使用分块合并
             elif len(file_paths) <= 100:
@@ -666,14 +724,15 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                     silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
                     
                     for i, file_path in enumerate(chunk_paths):
-                        audio = AudioSegment.from_mp3(file_path)
+                        audio = audio_loader(file_path)
                         chunk_combined += audio
                         if silence and i < len(chunk_paths) - 1:
                             chunk_combined += silence
                     
                     # 保存临时分块文件
-                    chunk_file = f"{output_path}_chunk_{chunk_idx}.mp3"
-                    chunk_combined.export(chunk_file, format="mp3", parameters=["-q:a", "2"])
+                    chunk_file_ext = "wav" if audio_format.lower() == "wav" else "mp3"
+                    chunk_file = f"{output_path}_chunk_{chunk_idx}.{chunk_file_ext}"
+                    chunk_combined.export(chunk_file, format=export_format, **export_params)
                     return chunk_file
                 
                 # 使用线程池处理分块（I/O密集型）
@@ -685,7 +744,7 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                 silence_between_chunks = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
                 
                 for i, chunk_file in enumerate(chunk_files):
-                    chunk_audio = AudioSegment.from_mp3(chunk_file)
+                    chunk_audio = audio_loader(chunk_file)
                     final_combined += chunk_audio
                     if silence_between_chunks and i < len(chunk_files) - 1:
                         final_combined += silence_between_chunks
@@ -693,7 +752,7 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                     # 立即删除临时文件以节省空间
                     os.remove(chunk_file)
                 
-                final_combined.export(output_path, format="mp3", parameters=["-q:a", "2"])
+                final_combined.export(output_path, format=export_format, **export_params)
                 
             # 策略3: 大量文件使用高级分层合并
             else:
@@ -705,12 +764,12 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                     silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
                     
                     for i, file_path in enumerate(file_batch):
-                        audio = AudioSegment.from_mp3(file_path)
+                        audio = audio_loader(file_path)
                         combined += audio
                         if silence and i < len(file_batch) - 1:
                             combined += silence
                     
-                    combined.export(temp_output, format="mp3", parameters=["-q:a", "2"])
+                    combined.export(temp_output, format=export_format, **export_params)
                     return temp_output
                 
                 # 第一层：并行合并小批次
@@ -721,7 +780,8 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                 with ThreadPoolExecutor(max_workers=min(6, len(batches))) as executor:
                     futures = []
                     for i, batch in enumerate(batches):
-                        temp_file = f"{output_path}_temp_{i}.mp3"
+                        temp_file_ext = "wav" if audio_format.lower() == "wav" else "mp3"
+                        temp_file = f"{output_path}_temp_{i}.{temp_file_ext}"
                         future = executor.submit(merge_files_batch, batch, temp_file)
                         futures.append((future, temp_file))
                     
@@ -734,7 +794,7 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                 silence_between_batches = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
                 
                 for i, temp_file in enumerate(temp_files):
-                    batch_audio = AudioSegment.from_mp3(temp_file)
+                    batch_audio = audio_loader(temp_file)
                     final_combined += batch_audio
                     if silence_between_batches and i < len(temp_files) - 1:
                         final_combined += silence_between_batches
@@ -742,11 +802,11 @@ def combine_audio_files(file_paths, output_path, silence_duration=200):
                     # 立即删除临时文件
                     os.remove(temp_file)
                 
-                final_combined.export(output_path, format="mp3", parameters=["-q:a", "2"])
+                final_combined.export(output_path, format=export_format, **export_params)
             
             processing_time = time.time() - start_time
             avg_time_per_file = processing_time / len(file_paths)
-            print(f"✅ M3 Max优化合并完成: {len(file_paths)} 个文件, 用时 {processing_time:.2f}s, 平均每文件 {avg_time_per_file:.3f}s")
+            print(f"✅ M3 Max优化合并完成: {len(file_paths)} 个文件 ({audio_format}), 用时 {processing_time:.2f}s, 平均每文件 {avg_time_per_file:.3f}s")
             return True
             
         except ImportError:
@@ -777,7 +837,7 @@ def api_combine_audio():
             return jsonify({'error': '请提供音频文件列表'}), 400
         
         audio_files = data.get('audio_files', [])
-        output_name = data.get('output_name', f'combined_{uuid.uuid4()}.mp3')
+        output_name = data.get('output_name', f'combined_{uuid.uuid4()}.wav')
         
         if not audio_files:
             return jsonify({'error': '音频文件列表不能为空'}), 400
@@ -913,7 +973,8 @@ def api_batch_tts():
     批量生成TTS音频并合并
     ✨ 智能模式：自动选择串行或并发处理以获得最佳性能
     📱 完全兼容原有API，前端无需任何修改
-    🚀 大幅提升处理速度，特别是多项目场景
+    大幅提升处理速度，特别是多项目场景
+    🎵 支持MP3和WAV格式输出
     """
     try:
         data = request.get_json()
@@ -921,11 +982,12 @@ def api_batch_tts():
             return jsonify({'error': '请提供TTS项目列表'}), 400
         
         items = data.get('items', [])
-        output_name = data.get('output_name', f'batch_tts_{uuid.uuid4()}.mp3')
+        output_name = data.get('output_name', f'batch_tts_{uuid.uuid4()}.wav')
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
         silence_duration = data.get('silence_duration', 200)  # 默认200ms
+        audio_format = data.get('audio_format', 'wav').lower()  # 新增：音频格式支持
         
         # 智能模式参数（可选，不影响原有API）
         force_serial = data.get('force_serial', False)  # 强制串行处理
@@ -934,16 +996,26 @@ def api_batch_tts():
         if not items:
             return jsonify({'error': 'TTS项目列表不能为空'}), 400
         
+        # 验证音频格式
+        if audio_format not in ['mp3', 'wav']:
+            return jsonify({'error': '支持的音频格式: mp3, wav'}), 400
+        
+        # 根据格式调整输出文件扩展名
+        if audio_format == 'wav' and not output_name.endswith('.wav'):
+            output_name = output_name.replace('.mp3', '.wav') if output_name.endswith('.mp3') else output_name + '.wav'
+        elif audio_format == 'mp3' and not output_name.endswith('.mp3'):
+            output_name = output_name.replace('.wav', '.mp3') if output_name.endswith('.wav') else output_name + '.mp3'
+        
         start_time = time.time()
         items_count = len(items)
         
         # 智能选择处理模式
         if force_serial or items_count <= 3:
             processing_mode = 'serial'
-            print(f"🔄 使用串行处理模式 (项目数: {items_count})")
+            print(f"🔄 使用串行处理模式 (项目数: {items_count}, 格式: {audio_format})")
         else:
             processing_mode = 'concurrent'
-            print(f"⚡ 使用智能并发处理模式 (项目数: {items_count}, 并发数: {max_concurrent})")
+            print(f"⚡ 使用智能并发处理模式 (项目数: {items_count}, 并发数: {max_concurrent}, 格式: {audio_format})")
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -952,7 +1024,7 @@ def api_batch_tts():
             if processing_mode == 'concurrent':
                 # 并发处理模式
                 try:
-                    results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch, None))
+                    results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch, max_concurrent, audio_format))
                     temp_files = [result[0] for result in results]
                 finally:
                     # 恢复原始信号量（不需要了，因为每个事件循环都有自己的）
@@ -970,15 +1042,16 @@ def api_batch_tts():
                     if not text.strip():
                         continue
                     
-                    # 生成临时文件名
-                    temp_filename = f"batch_{uuid.uuid4()}.mp3"
+                    # 生成临时文件名（使用指定格式）
+                    file_ext = "wav" if audio_format == "wav" else "mp3"
+                    temp_filename = f"batch_{uuid.uuid4()}.{file_ext}"
                     temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
                     
                     # 生成TTS音频
-                    loop.run_until_complete(generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch))
+                    loop.run_until_complete(generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch, None, audio_format))
                     temp_files.append(temp_path)
                     
-                    print(f"已生成音频 {i+1}/{items_count}: {text[:20]}...")
+                    print(f"已生成音频 {i+1}/{items_count}: {text[:20]}... (格式: {audio_format})")
             
             if not temp_files:
                 return jsonify({'error': '没有生成任何音频文件'}), 400
@@ -1004,11 +1077,11 @@ def api_batch_tts():
             if not validated_files:
                 return jsonify({'error': '没有有效的音频文件可合并'}), 400
             
-            print(f"📁 准备合并 {len(validated_files)}/{len(temp_files)} 个有效文件")
+            print(f"📁 准备合并 {len(validated_files)}/{len(temp_files)} 个有效文件 (格式: {audio_format})")
             
             # 合并所有音频文件
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
-            success = combine_audio_files_ffmpeg(validated_files, output_path, silence_duration)
+            success = combine_audio_files_ffmpeg(validated_files, output_path, silence_duration, audio_format)
             
             # 清理临时文件
             for temp_file in validated_files:
@@ -1029,7 +1102,8 @@ def api_batch_tts():
                     'success': True,
                     'download_url': download_url,
                     'filename': output_name,
-                    'items_processed': len(validated_files)
+                    'items_processed': len(validated_files),
+                    'audio_format': audio_format  # 新增：返回音频格式信息
                 }
                 
                 # 可选性能信息（不影响原有前端解析）
@@ -1038,14 +1112,14 @@ def api_batch_tts():
                     response_data['processing_mode'] = 'concurrent'
                     if generation_time > 0:
                         speedup_estimate = max(1.5, items_count * 0.8 / generation_time)
-                        response_data['performance_info'] = f"⚡ 并发处理 {len(validated_files)} 个音频文件，用时 {generation_time:.2f} 秒 (预估提速 {speedup_estimate:.1f}x)"
+                        response_data['performance_info'] = f"⚡ 并发处理 {len(validated_files)} 个音频文件 ({audio_format}), 用时 {generation_time:.2f} 秒 (预估提速 {speedup_estimate:.1f}x)"
                 else:
                     response_data['processing_mode'] = 'serial'
                     response_data['generation_time'] = round(generation_time, 2)
                 
                 # 记录性能日志
                 avg_time_per_item = generation_time / len(validated_files) if validated_files else 0
-                print(f"✅ {processing_mode.upper()} 处理完成: {len(validated_files)} 项, 总用时 {generation_time:.2f}s, 平均每项 {avg_time_per_item:.2f}s")
+                print(f"✅ {processing_mode.upper()} 处理完成: {len(validated_files)} 项 ({audio_format}), 总用时 {generation_time:.2f}s, 平均每项 {avg_time_per_item:.2f}s")
                 
                 return jsonify(response_data)
             else:
@@ -1080,15 +1154,26 @@ def api_batch_tts_with_timecodes():
             return jsonify({'error': '请提供TTS项目列表'}), 400
         
         items = data.get('items', [])
-        output_name = data.get('output_name', f'batch_tts_{uuid.uuid4()}.mp3')
+        output_name = data.get('output_name', f'batch_tts_{uuid.uuid4()}.wav')
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
         silence_duration = data.get('silence_duration', 200)  # 默认200ms
         use_concurrent = data.get('use_concurrent', True)  # 是否使用并发处理
+        audio_format = data.get('audio_format', 'wav').lower()  # 新增：音频格式支持
         
         if not items:
             return jsonify({'error': 'TTS项目列表不能为空'}), 400
+        
+        # 验证音频格式
+        if audio_format not in ['mp3', 'wav']:
+            return jsonify({'error': '支持的音频格式: mp3, wav'}), 400
+        
+        # 根据格式调整输出文件扩展名
+        if audio_format == 'wav' and not output_name.endswith('.wav'):
+            output_name = output_name.replace('.mp3', '.wav') if output_name.endswith('.mp3') else output_name + '.wav'
+        elif audio_format == 'mp3' and not output_name.endswith('.mp3'):
+            output_name = output_name.replace('.wav', '.mp3') if output_name.endswith('.wav') else output_name + '.mp3'
         
         start_time = time.time()
         timecodes = []
@@ -1100,7 +1185,7 @@ def api_batch_tts_with_timecodes():
         try:
             if use_concurrent and len(items) > 3:
                 # 使用并发处理
-                results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch, None))
+                results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch, None, audio_format))
                 temp_files = []
                 
                 # 按原始顺序处理结果并计算时间点
@@ -1145,12 +1230,13 @@ def api_batch_tts_with_timecodes():
                     if not text.strip():
                         continue
                     
-                    # 生成临时文件名
-                    temp_filename = f"batch_{uuid.uuid4()}.mp3"
+                    # 生成临时文件名（使用指定格式）
+                    file_ext = "wav" if audio_format == "wav" else "mp3"
+                    temp_filename = f"batch_{uuid.uuid4()}.{file_ext}"
                     temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
                     
                     # 生成TTS音频
-                    loop.run_until_complete(generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch))
+                    loop.run_until_complete(generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch, None, audio_format))
                     
                     # 分析音频时长
                     duration = analyze_audio_duration(temp_path)
@@ -1175,7 +1261,7 @@ def api_batch_tts_with_timecodes():
             
             # 合并所有音频文件
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
-            success = combine_audio_files_ffmpeg(temp_files, output_path, silence_duration)
+            success = combine_audio_files_ffmpeg(temp_files, output_path, silence_duration, audio_format)
             
             # 清理临时文件
             for temp_file in temp_files:
