@@ -1,71 +1,80 @@
-# Edge TTS 网页应用
+# TTS 服务项目
 
-这是一个基于 Flask 的网页应用，使用 Microsoft Edge TTS 服务来生成语音。
+🎵 智能语音合成服务，支持 Azure TTS 和 Edge TTS
 
-## 功能特点
+## 🚀 快速开始
 
-- 文本转语音（TTS）
-- 支持多种中文语音
-- 可调节语速、音量和音调
-- 在线播放生成的音频
-- 下载生成的音频文件
-- 历史记录管理（使用浏览器本地存储）
-
-## 安装步骤
-
-1. 克隆代码库：
+**推荐使用重构版 v3.0：**
 
 ```bash
-git clone https://github.com/yourusername/edge-tts-web.git
-cd edge-tts-web
+# 安装依赖
+pip install -r requirements_new.txt
+
+# 启动服务
+python start_new.py
 ```
 
-2. 创建并激活虚拟环境（可选但推荐）：
+详细文档请查看：[README_NEW.md](README_NEW.md)
+
+## 📁 项目结构
+
+### 新版本文件（推荐使用）
+
+- `app.py` - 重构版主应用
+- `start_new.py` - 新版启动脚本
+- `requirements_new.txt` - 新版依赖
+- `README_NEW.md` - 详细使用文档
+- `config/` - 配置模块
+- `engines/` - TTS 引擎模块
+- `services/` - 服务层
+- `utils/` - 工具模块
+
+### 实用工具
+
+- `install_ffmpeg.py` - FFmpeg 安装助手（可选，用于音频处理加速）
+
+### 遗留文件（保持兼容性）
+
+- `requirements.txt` - 原版依赖
+- `templates/` - 前端模板
+- `static/` - 静态文件
+
+## ✨ 主要特性
+
+- 🔵 **Azure TTS 支持** - 默认使用 Azure 认知服务
+- 🟢 **Edge TTS 备选** - 自动故障转移
+- 🏗️ **模块化设计** - 清晰的架构分离
+- ⚡ **智能并发** - 自动选择最优处理模式
+- 💾 **智能缓存** - 基于内容的缓存系统
+- 🎵 **多格式支持** - MP3 和 WAV 格式
+- 🌐 **完整 API** - 兼容原有 API 接口
+
+## 🔧 配置
+
+设置 Azure TTS（推荐）：
 
 ```bash
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS/Linux
-source venv/bin/activate
+export AZURE_SPEECH_KEY="your_azure_key"
+export AZURE_SPEECH_REGION="eastasia"
 ```
 
-3. 安装依赖：
+## 📖 文档
 
-```bash
-pip install -r requirements.txt
-```
+- [完整使用文档](README_NEW.md)
+- [API 接口说明](README_NEW.md#api-接口)
+- [故障排除指南](README_NEW.md#故障排除)
 
-## 运行应用
+## 🆕 更新日志
 
-```bash
-python app.py
-```
+**v3.0 (重构版)**
 
-应用将在 http://127.0.0.1:5000 运行。
+- ✅ 完全重构，模块化设计
+- ✅ Azure TTS 作为默认引擎
+- ✅ 自动故障转移
+- ✅ 智能缓存和并发处理
+- ✅ 目录自动创建
+- ✅ 清理旧文件，项目结构更简洁
 
-## 使用方法
+## �� 许可证
 
-1. 在文本框中输入要转换为语音的文本
-2. 选择语音（默认为中文小晓）
-3. 调整语速、音量和音调（可选）
-4. 点击"生成语音"按钮
-5. 使用播放器控件收听生成的语音
-6. 点击"下载音频"按钮保存音频文件
-7. 点击"保存到历史"将此次生成的语音保存到历史记录中
-
-## 注意事项
-
-- 生成的音频文件存储在 `static/audio` 目录中
-- 历史记录使用浏览器的本地存储，清除浏览器缓存会导致历史记录丢失
-- 应用依赖于微软的在线 TTS 服务，需要网络连接
-
-## 技术栈
-
-- 后端：Flask, edge-tts
-- 前端：HTML, CSS, JavaScript
-- 样式：Bootstrap 5
-
-## 许可证
-
-本项目使用 MIT 许可证。
+MIT License
