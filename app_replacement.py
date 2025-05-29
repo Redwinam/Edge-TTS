@@ -44,7 +44,29 @@ DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural'
 
 # 并发配置 - 可以通过环境变量调整
 MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', 10))
-SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+
+# 事件循环本地的 Semaphore 存储
+_loop_semaphores = {}
+
+def get_semaphore(max_concurrent=None):
+    """获取当前事件循环的 Semaphore"""
+    try:
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+        
+        # 如果指定了自定义并发数，创建临时的Semaphore
+        if max_concurrent and max_concurrent != MAX_CONCURRENT_TASKS:
+            return asyncio.Semaphore(max_concurrent)
+        
+        if loop_id not in _loop_semaphores:
+            _loop_semaphores[loop_id] = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+            print(f"🔧 为事件循环 {loop_id} 创建新的 Semaphore (并发数: {MAX_CONCURRENT_TASKS})")
+        
+        return _loop_semaphores[loop_id]
+    except RuntimeError:
+        # 如果没有运行中的事件循环，创建临时的
+        concurrent_limit = max_concurrent if max_concurrent else MAX_CONCURRENT_TASKS
+        return asyncio.Semaphore(concurrent_limit)
 
 print(f"🚀 TTS服务启动，智能并发处理已启用")
 print(f"📊 最大并发任务数: {MAX_CONCURRENT_TASKS}")
@@ -359,9 +381,9 @@ def combine_audio_files_ffmpeg(file_paths, output_path, silence_duration=200):
         return combine_audio_files(file_paths, output_path, silence_duration)
 
 @async_retry(retries=3, delay=2)
-async def generate_tts(text, output_path, voice, rate, volume, pitch):
+async def generate_tts(text, output_path, voice, rate, volume, pitch, max_concurrent=None):
     """优化的TTS生成函数（与原版接口完全兼容）"""
-    async with SEMAPHORE:  # 限制并发数量
+    async with get_semaphore(max_concurrent):  # 限制并发数量
         # --- 缓存逻辑开始（与原版一致）---
         # 1. 构建缓存键字符串，包含所有影响语音输出的参数
         cache_key_str = f"{text}-{voice}-{rate}-{volume}-{pitch}"
@@ -402,7 +424,7 @@ async def generate_tts(text, output_path, voice, rate, volume, pitch):
         return True # 明确返回True
 
 # 批量并发生成TTS
-async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: str, pitch: str) -> List[Tuple[str, Dict]]:
+async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: str, pitch: str, max_concurrent=None) -> List[Tuple[str, Dict]]:
     """批量并发生成TTS音频"""
     tasks = []
     
@@ -420,8 +442,8 @@ async def batch_generate_tts_concurrent(items: List[Dict], rate: str, volume: st
         temp_filename = f"batch_{uuid.uuid4()}.mp3"
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
         
-        # 创建异步任务
-        task = generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch)
+        # 创建异步任务，传递自定义并发数
+        task = generate_tts(text, temp_path, voice, item_rate, item_volume, item_pitch, max_concurrent)
         tasks.append((task, temp_path, item, i)) # item 和 i 用于结果匹配
     
     print(f"开始智能并发生成 {len(tasks)} 个TTS音频...")
@@ -929,17 +951,12 @@ def api_batch_tts():
         try:
             if processing_mode == 'concurrent':
                 # 并发处理模式
-                global SEMAPHORE
-                original_semaphore = SEMAPHORE
-                if max_concurrent != MAX_CONCURRENT_TASKS:
-                    SEMAPHORE = asyncio.Semaphore(max_concurrent)
-                
                 try:
-                    results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch))
+                    results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch, None))
                     temp_files = [result[0] for result in results]
                 finally:
-                    # 恢复原始信号量
-                    SEMAPHORE = original_semaphore
+                    # 恢复原始信号量（不需要了，因为每个事件循环都有自己的）
+                    pass
             else:
                 # 串行处理模式（保持原有逻辑）
                 temp_files = []
@@ -1083,7 +1100,7 @@ def api_batch_tts_with_timecodes():
         try:
             if use_concurrent and len(items) > 3:
                 # 使用并发处理
-                results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch))
+                results = loop.run_until_complete(batch_generate_tts_concurrent(items, rate, volume, pitch, None))
                 temp_files = []
                 
                 # 按原始顺序处理结果并计算时间点
