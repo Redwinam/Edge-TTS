@@ -1,0 +1,16 @@
+# TTS服务核心依赖
+flask>=2.3.0
+flask-cors>=4.0.0
+edge-tts>=6.1.0
+
+# Azure TTS支持
+aiohttp>=3.8.0
+
+# 高性能异步文件操作
+aiofiles>=23.0.0
+
+# 音频处理 (可选，但推荐)
+pydub>=0.25.0
+
+# 类型注解支持
+typing-extensions>=4.5.0 
