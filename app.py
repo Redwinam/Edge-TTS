@@ -258,10 +258,30 @@ def api_batch_tts():
                 'engine': tts_service.get_current_engine_info().get('name', 'unknown')
             }
             
+            # 添加去重效率信息
+            if 'unique_items_synthesized' in result:
+                response_data['unique_items_synthesized'] = result['unique_items_synthesized']
+                
+                # 计算去重效果
+                duplicate_count = result['items_processed'] - result['unique_items_synthesized']
+                if duplicate_count > 0:
+                    efficiency_gain = round((duplicate_count / result['items_processed']) * 100, 1)
+                    response_data['deduplication_info'] = {
+                        'duplicate_items_found': duplicate_count,
+                        'efficiency_gain_percent': efficiency_gain,
+                        'description': f"通过去重减少了 {duplicate_count} 次重复合成，效率提升 {efficiency_gain}%"
+                    }
+            
             # 性能信息
             if result['processing_mode'] == 'concurrent':
                 speedup_estimate = max(1.5, len(items) * 0.8 / result['generation_time']) if result['generation_time'] > 0 else 1.0
-                response_data['performance_info'] = f"⚡ 并发处理 {result['items_processed']} 个音频文件 ({audio_format}), 用时 {result['generation_time']:.2f} 秒 (预估提速 {speedup_estimate:.1f}x)"
+                performance_info = f"⚡ 并发处理 {result['items_processed']} 个音频文件 ({audio_format}), 用时 {result['generation_time']:.2f} 秒 (预估提速 {speedup_estimate:.1f}x)"
+                
+                # 如果有去重信息，追加到性能信息中
+                if 'deduplication_info' in response_data:
+                    performance_info += f" + 去重优化 {response_data['deduplication_info']['efficiency_gain_percent']}%"
+                    
+                response_data['performance_info'] = performance_info
             
             return jsonify(response_data)
             

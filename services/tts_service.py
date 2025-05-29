@@ -209,6 +209,97 @@ class TTSService:
         print(f"🎵 并发生成完成: 成功 {len(results)}/{len(tasks)} 个音频文件")
         return results
     
+    def _deduplicate_items(self, items: List[Dict]) -> Tuple[List[Dict], Dict[str, List[int]]]:
+        """
+        对批量TTS项目进行去重处理
+        
+        Args:
+            items: 原始项目列表
+            
+        Returns:
+            tuple: (去重后的项目列表, 去重映射表)
+                  去重映射表格式: {unique_key: [原始索引列表]}
+        """
+        seen_items = {}  # 存储已见过的项目
+        unique_items = []  # 去重后的唯一项目
+        dedup_map = {}  # 映射表：unique_key -> 原始索引列表
+        
+        for i, item in enumerate(items):
+            text = item.get('text', '').strip()
+            if not text:
+                continue
+                
+            voice = item.get('voice', AZURE_CONFIG['default_voice'])
+            rate = item.get('rate', '+0%')
+            volume = item.get('volume', '+0%')
+            pitch = item.get('pitch', '+0Hz')
+            
+            # 生成唯一标识键
+            unique_key = f"{text}|{voice}|{rate}|{volume}|{pitch}"
+            
+            if unique_key in seen_items:
+                # 如果已存在，添加到映射表
+                dedup_map[unique_key].append(i)
+            else:
+                # 新的唯一项目
+                seen_items[unique_key] = len(unique_items)
+                unique_items.append(item)
+                dedup_map[unique_key] = [i]
+        
+        original_count = len(items)
+        unique_count = len(unique_items)
+        duplicate_count = original_count - unique_count
+        
+        if duplicate_count > 0:
+            print(f"🔄 内容去重: 原始 {original_count} 个项目 → 去重后 {unique_count} 个项目 (减少 {duplicate_count} 个重复项目)")
+            
+            # 打印去重详情
+            for unique_key, indices in dedup_map.items():
+                if len(indices) > 1:
+                    text_preview = unique_key.split('|')[0][:30]
+                    print(f"   📋 重复内容: '{text_preview}...' 出现 {len(indices)} 次 (位置: {indices})")
+        else:
+            print(f"✅ 无重复内容: {original_count} 个项目均为唯一")
+            
+        return unique_items, dedup_map
+
+    def _reconstruct_results_with_dedup(self, unique_results: List[str], 
+                                      dedup_map: Dict[str, List[int]], 
+                                      unique_items: List[Dict]) -> List[str]:
+        """
+        根据去重映射表重建完整的结果列表
+        
+        Args:
+            unique_results: 去重后的音频文件路径列表
+            dedup_map: 去重映射表
+            unique_items: 去重后的项目列表
+            
+        Returns:
+            完整的音频文件路径列表（包含重复项目的复制）
+        """
+        if not unique_results or not dedup_map:
+            return unique_results
+            
+        full_results = [None] * sum(len(indices) for indices in dedup_map.values())
+        
+        # 为每个唯一项目生成键
+        for i, (unique_item, result_path) in enumerate(zip(unique_items, unique_results)):
+            text = unique_item.get('text', '').strip()
+            voice = unique_item.get('voice', AZURE_CONFIG['default_voice'])
+            rate = unique_item.get('rate', '+0%')
+            volume = unique_item.get('volume', '+0%')
+            pitch = unique_item.get('pitch', '+0Hz')
+            
+            unique_key = f"{text}|{voice}|{rate}|{volume}|{pitch}"
+            
+            if unique_key in dedup_map:
+                # 复制音频文件到所有需要的位置
+                for original_index in dedup_map[unique_key]:
+                    full_results[original_index] = result_path
+        
+        # 过滤掉None值（可能是空文本项目）
+        return [result for result in full_results if result is not None]
+
     async def create_batch_audio(self, items: List[Dict], output_name: str, 
                                rate: str, volume: str, pitch: str,
                                silence_duration: int = 200, 
@@ -217,26 +308,37 @@ class TTSService:
                                audio_format: str = "wav") -> Dict[str, Any]:
         """批量创建音频并合并"""
         start_time = time.time()
-        items_count = len(items)
+        original_items_count = len(items)
+        
+        # 🔄 内容去重处理
+        unique_items, dedup_map = self._deduplicate_items(items)
+        items_count = len(unique_items)
         
         # 智能选择处理模式
         if not use_concurrent or items_count <= 3:
             processing_mode = 'serial'
             print(f"🔄 使用串行处理模式 (项目数: {items_count}, 格式: {audio_format})")
-            temp_files = await self._batch_synthesize_serial(items, rate, volume, pitch, audio_format)
+            temp_files = await self._batch_synthesize_serial(unique_items, rate, volume, pitch, audio_format)
         else:
             processing_mode = 'concurrent'
             concurrent_limit = max_concurrent or TTS_CONFIG['max_concurrent_tasks']
             print(f"⚡ 使用智能并发处理模式 (项目数: {items_count}, 并发数: {concurrent_limit}, 格式: {audio_format})")
-            results = await self.batch_synthesize_concurrent(items, rate, volume, pitch, concurrent_limit, audio_format)
+            results = await self.batch_synthesize_concurrent(unique_items, rate, volume, pitch, concurrent_limit, audio_format)
             temp_files = [result[0] for result in results]
         
         if not temp_files:
             raise ValueError('没有生成任何音频文件')
         
+        # 🔄 根据去重映射重建完整结果
+        if len(unique_items) < original_items_count:
+            print(f"🔄 重建完整音频序列: {len(temp_files)} 个唯一文件 → {original_items_count} 个音频片段")
+            full_temp_files = self._reconstruct_results_with_dedup(temp_files, dedup_map, unique_items)
+        else:
+            full_temp_files = temp_files
+        
         # 验证文件
         validated_files = []
-        for temp_file in temp_files:
+        for temp_file in full_temp_files:
             if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
                 validated_files.append(temp_file)
         
@@ -249,10 +351,12 @@ class TTSService:
             validated_files, output_path, silence_duration, audio_format
         )
         
-        # 清理临时文件
-        for temp_file in validated_files:
+        # 清理临时文件（只删除唯一的文件，避免重复删除）
+        unique_temp_files = list(set(temp_files))  # 去除重复的文件路径
+        for temp_file in unique_temp_files:
             try:
-                os.remove(temp_file)
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
             except:
                 pass
         
@@ -261,12 +365,20 @@ class TTSService:
         if not success:
             raise RuntimeError('音频合并失败')
         
+        duplicate_count = original_items_count - items_count
+        efficiency_info = ""
+        if duplicate_count > 0:
+            efficiency_gain = round((duplicate_count / original_items_count) * 100, 1)
+            efficiency_info = f" (去重节省 {duplicate_count} 次合成，效率提升 {efficiency_gain}%)"
+        
         return {
             'output_path': output_path,
-            'items_processed': len(validated_files),
+            'items_processed': original_items_count,  # 返回原始项目数
+            'unique_items_synthesized': items_count,   # 实际合成的唯一项目数
             'generation_time': round(generation_time, 2),
             'processing_mode': processing_mode,
-            'audio_format': audio_format
+            'audio_format': audio_format,
+            'efficiency_info': efficiency_info
         }
     
     async def _batch_synthesize_serial(self, items: List[Dict], rate: str, volume: str, 
