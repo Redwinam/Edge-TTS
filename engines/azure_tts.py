@@ -135,16 +135,22 @@ class AzureTTSEngine(TTSEngine):
         try:
             token = await self._get_access_token()
             
-            # 从kwargs获取期望的音频格式，默认为wav
-            requested_format = kwargs.get('audio_format_preference', 'wav').lower()
+            # 从kwargs获取期望的音频格式，默认为 'wav'
+            # 这个 'audio_format_preference' 由 synthesize_to_file 方法根据其 'audio_format' 参数传递
+            # 而 synthesize_to_file 的 'audio_format' 参数在 tts_service.py 中调用时默认为 'wav'
+            requested_format_pref = kwargs.get('audio_format_preference', 'wav').lower()
             
             output_format_header = ''
-            if requested_format == 'wav':
-                output_format_header = 'riff-48khz-16bit-mono-pcm' # 优先请求高质量WAV
-            elif requested_format == 'mp3':
-                output_format_header = 'audio-48khz-192kbitrate-mono-mp3' # 高质量MP3
-            else: # 默认或未知格式，回退到之前的值或一个通用值
-                output_format_header = 'riff-24khz-16bit-mono-pcm' # 或者 Azure 支持的通用高质量WAV
+            if requested_format_pref == 'mp3':
+                output_format_header = 'audio-48khz-192kbitrate-mono-mp3'
+                print("🔵 Azure TTS: Requesting MP3 format (audio-48khz-192kbitrate-mono-mp3)")
+            else: # 默认为WAV或任何其他非MP3的请求都视为WAV
+                output_format_header = 'riff-48khz-16bit-mono-pcm'
+                if requested_format_pref == 'wav':
+                    print("🔵 Azure TTS: Requesting WAV format (riff-48khz-16bit-mono-pcm)")
+                else:
+                    # 此情况理论上不应发生，因为默认是 'wav'，且 tts_service 只传递 'wav' 或 'mp3'
+                    print(f"⚠️ Azure TTS: Unexpected audio_format_preference '{requested_format_pref}'. Defaulting to WAV (riff-48khz-16bit-mono-pcm).")
 
             # 构建SSML
             ssml = self._build_ssml(text, voice, **kwargs)

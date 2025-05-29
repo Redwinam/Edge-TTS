@@ -85,68 +85,59 @@ class AudioProcessor:
         """在线程中运行FFmpeg合并"""
         target_sample_rate = 48000 # 目标采样率
         try:
+            input_parts = []
+            filter_complex_parts = []
+            stream_labels = [] # To store labels like [a0], [a1] for concat filter
+
             if silence_duration > 0:
-                # 有静音间隔的合并
-                filter_parts = []
-                input_parts = []
-                
                 for i, file_path in enumerate(valid_files):
                     input_parts.extend(['-i', file_path])
-                    filter_parts.append(f'[{i}:a]aresample={target_sample_rate}') # 确保输入被重采样到目标采样率
+                    # Resample current audio file and give it a label for concat
+                    filter_complex_parts.append(f'[{i}:a]aresample={target_sample_rate}[s{i}]') 
+                    stream_labels.append(f'[s{i}]')
                     
                     if i < len(valid_files) - 1:
-                        silence_input_idx = len(valid_files) + i
-                        # 使用目标采样率生成静音
+                        # Generate silence with target sample rate and label it
+                        silence_label = f'[silence{i}]'
+                        # Using a unique stream index for silence input to avoid conflict if file count is large
+                        silence_input_idx_ffmpeg = len(valid_files) + i 
                         silence_filter_str = f'aevalsrc=0:duration={silence_duration/1000}:sample_rate={target_sample_rate}'
                         input_parts.extend(['-f', 'lavfi', '-i', silence_filter_str])
-                        filter_parts.append(f'[{silence_input_idx}:a]')
+                        # The input for silence is len(valid_files) + i for ffmpeg indexing
+                        filter_complex_parts.append(f'[{silence_input_idx_ffmpeg}:a]acopy{silence_label}') 
+                        stream_labels.append(silence_label)
                 
-                concat_filter = ''.join(filter_parts) + f'concat=n={len(filter_parts)}:v=0:a=1[out]'
+                concat_filter = ''.join(stream_labels) + f'concat=n={len(stream_labels)}:v=0:a=1[out]'
+                filter_complex_parts.append(concat_filter)
+
+            else: # No silence duration
+                for i, file_path in enumerate(valid_files):
+                    input_parts.extend(['-i', file_path])
+                    # Resample current audio file and give it a temp label [sa0], [sa1] etc.
+                    filter_complex_parts.append(f'[{i}:a]aresample={target_sample_rate}[s{i}]')
+                    stream_labels.append(f'[s{i}]')
                 
-                cmd = [
-                    'ffmpeg', '-y',
-                    *input_parts,
-                    '-filter_complex', concat_filter,
-                    '-map', '[out]',
-                    '-ar', str(target_sample_rate), # 确保输出采样率
-                    *codec_settings,
-                    output_path
-                ]
-            else:
-                # 无静音间隔的合并
-                # 对于concat demuxer，FFmpeg通常会尝试使用第一个输入的参数。
-                # 为了确保48kHz，我们可以对每个输入进行预处理或在filter_complex中处理，
-                # 但更简单的方式是确保所有输入片段已经是48kHz。
-                # 如果之前的步骤已确保所有片段为48kHz WAV，此处的concat应该能正确工作。
-                # 我们也可以在最后加 -ar 48000 强制输出采样率
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
-                    filelist_path = f.name
-                    for file_path in valid_files:
-                        abs_path = os.path.abspath(file_path)
-                        escaped_path = abs_path.replace("'", r"\'").replace('"', r'\"')
-                        # FFmpeg的concat demuxer需要文件路径。如果文件本身不是48kHz，这里不会自动转换。
-                        # 假设上游缓存的文件已经是48kHz。
-                        f.write(f"file '{escaped_path}'\n")
-                
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'concat',
-                    '-safe', '0',
-                    '-i', filelist_path,
-                    '-ar', str(target_sample_rate), # 强制输出采样率为48000Hz
-                    *codec_settings,
-                    output_path
-                ]
+                if not stream_labels: # Should not happen if valid_files is not empty
+                    print("错误：没有有效的流进行合并。")
+                    return False
+
+                concat_filter = ''.join(stream_labels) + f'concat=n={len(stream_labels)}:v=0:a=1[out]'
+                filter_complex_parts.append(concat_filter)
+
+            final_filter_complex = ';'.join(filter_complex_parts)
+
+            cmd = [
+                'ffmpeg', '-y',
+                *input_parts,
+                '-filter_complex', final_filter_complex,
+                '-map', '[out]',
+                '-ar', str(target_sample_rate),
+                *codec_settings,
+                output_path
+            ]
             
             # 执行命令
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
-            # 清理临时文件
-            if silence_duration == 0 and 'filelist_path' in locals():
-                try:
-                    os.unlink(filelist_path)
-                except:
-                    pass
             
             return result.returncode == 0
             
