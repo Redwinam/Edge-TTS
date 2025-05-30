@@ -302,38 +302,85 @@ def api_batch_tts():
 @app.route('/api/batch_tts_with_timecodes', methods=['POST'])
 def api_batch_tts_with_timecodes():
     """
-    批量生成TTS音频并合并，同时返回每个片段的时间点信息
-    用于视频生成等场景
+    批量生成TTS音频，不合并，返回每个片段的时间点信息。
+    用于视频生成等场景。
     """
     try:
         data = request.get_json()
         if not data or 'items' not in data:
             return jsonify({'error': '请提供TTS项目列表'}), 400
         
-        default_audio_format = TTS_CONFIG.get('default_format', 'mp3') # 从配置获取默认格式
+        default_audio_format = TTS_CONFIG.get('default_format', 'mp3')
         items = data.get('items', [])
-        # 默认输出文件名后缀应与默认格式一致
-        output_name_default = f'batch_tts_{{uuid.uuid4()}}.{default_audio_format}'
-        output_name = data.get('output_name', output_name_default)
+        # output_name is not strictly needed as we don't save a combined file, but can be used for logging or context
+        # output_name_default = f'batch_timecode_run_{{uuid.uuid4()}}' 
+        # output_name = data.get('output_name', output_name_default)
+        
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
-        silence_duration = data.get('silence_duration', 200)
+        silence_duration_ms = data.get('silence_duration_ms', data.get('silence_duration', 200)) # 支持旧的silence_duration
         use_concurrent = data.get('use_concurrent', True)
+        max_concurrent_from_req = data.get('max_concurrent')
         audio_format = data.get('audio_format', default_audio_format).lower()
         
         if not items:
             return jsonify({'error': 'TTS项目列表不能为空'}), 400
         
-        # 验证音频格式
         if audio_format not in TTS_CONFIG['supported_formats']:
             return jsonify({'error': f'支持的音频格式: {", ".join(TTS_CONFIG["supported_formats"])}'}), 400
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        # TODO: 实现时间点计算功能
-        # 目前先使用普通批量处理，之后可以扩展
-        return api_batch_tts()
-        
+        try:
+            # 确定并发数，优先使用请求中的值，否则使用配置的默认值
+            max_concurrent_tasks = max_concurrent_from_req if max_concurrent_from_req is not None else TTS_CONFIG['max_concurrent_tasks']
+
+            result = loop.run_until_complete(
+                tts_service.create_batch_tts_with_timecodes(
+                    items,
+                    rate,
+                    volume,
+                    pitch,
+                    silence_duration_ms=int(silence_duration_ms),
+                    audio_format=audio_format,
+                    use_concurrent=use_concurrent,
+                    max_concurrent=int(max_concurrent_tasks)
+                )
+            )
+            
+            # result 包含: success, timecodes, total_duration_with_silence_ms, items_processed_count, etc.
+            if result.get('success'):
+                response_data = {
+                    'success': True,
+                    'timecodes': result.get('timecodes', []),
+                    'total_duration_with_silence_ms': result.get('total_duration_with_silence_ms'),
+                    'items_processed_count': result.get('items_processed_count'),
+                    'unique_items_synthesized_count': result.get('unique_items_synthesized_count'),
+                    'actual_segments_with_audio_count': result.get('actual_segments_with_audio_count'),
+                    'silence_between_items_ms': result.get('silence_between_items_ms'),
+                    'generation_time_seconds': result.get('generation_time_seconds'),
+                    'processing_mode': result.get('processing_mode'),
+                    'audio_format_generated': result.get('audio_format_generated'),
+                    'engine_used': tts_service.get_current_engine_info().get('name', 'unknown')
+                }
+                return jsonify(response_data)
+            else:
+                # 如果 tts_service 返回 success: False，或者有特定错误信息
+                error_message = result.get('error', '时间码生成过程失败')
+                return jsonify({'error': error_message, 'details': result}), 500
+            
+        except ValueError as ve:
+            return jsonify({'error': f'参数错误: {str(ve)}'}), 400
+        except Exception as e:
+            app.logger.error(f"批量TTS (带时间码) 处理失败: {str(e)}", exc_info=True)
+            return jsonify({'error': f'批量TTS (带时间码) 处理失败: {str(e)}'}), 500
+        finally:
+            loop.close()
+            
     except Exception as e:
+        app.logger.error(f"请求处理失败 (batch_tts_with_timecodes): {str(e)}", exc_info=True)
         return jsonify({'error': f'请求处理失败: {str(e)}'}), 500
 
 

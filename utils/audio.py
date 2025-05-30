@@ -280,13 +280,50 @@ class AudioProcessor:
         """分析音频文件时长"""
         try:
             from pydub import AudioSegment
-            audio = AudioSegment.from_mp3(audio_path)
-            return len(audio) / 1000.0
+            # 尝试根据文件扩展名选择加载器
+            file_ext = os.path.splitext(audio_path)[1].lower()
+            if file_ext == ".wav":
+                audio = AudioSegment.from_wav(audio_path)
+            elif file_ext == ".mp3":
+                audio = AudioSegment.from_mp3(audio_path)
+            else:
+                # 尝试通用加载器
+                audio = AudioSegment.from_file(audio_path)
+            return len(audio) / 1000.0  # pydub 时长单位为毫秒
         except ImportError:
-            # 简单估算
+            print("⚠️ pydub未安装，无法准确分析音频时长。将根据文件大小进行粗略估算。")
+            # 简单估算 (假设 128kbps MP3, 即 16KB/秒)
             file_size = os.path.getsize(audio_path)
-            estimated_duration = (file_size / 1024 / 1024) * 60 / 8
-            return max(1.0, estimated_duration)
+            estimated_duration = file_size / (16 * 1024) 
+            return max(0.1, estimated_duration) # 避免返回0
         except Exception as e:
-            print(f"分析音频时长失败: {e}")
-            return 1.0 
+            print(f"❌ 分析音频 {audio_path} 时长失败: {e}. 将根据文件大小进行粗略估算。")
+            file_size = os.path.getsize(audio_path)
+            estimated_duration = file_size / (16 * 1024)
+            return max(0.1, estimated_duration) # 避免返回0
+
+    async def get_audio_durations(self, audio_paths: List[str]) -> List[float]:
+        """异步获取一组音频文件的时长列表"""
+        durations = []
+        # 在线程池中执行时长分析，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            tasks = [loop.run_in_executor(executor, self.analyze_audio_duration, path) for path in audio_paths]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"❌ 获取音频 {audio_paths[i]} 时长时发生错误: {result}")
+                # 对于获取失败的音频，可以根据需要返回一个默认值或标记
+                # 这里我们尝试基于文件大小进行估算作为后备
+                try:
+                    file_size = os.path.getsize(audio_paths[i])
+                    estimated_duration = file_size / (16 * 1024) # 假设 128kbps MP3
+                    durations.append(max(0.1, estimated_duration))
+                    print(f"   ⚠️  后备估算时长: {durations[-1]:.2f}s (基于文件大小)")
+                except Exception as size_error:
+                    print(f"   ❌ 无法获取文件大小进行后备估算: {size_error}")
+                    durations.append(0.0) # 或其他合适的默认值
+            else:
+                durations.append(result)
+        return durations 

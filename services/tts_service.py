@@ -423,4 +423,225 @@ class TTSService:
     
     def switch_engine(self, engine_name: str) -> bool:
         """切换TTS引擎"""
-        return self.engine_manager.set_current_engine(engine_name) 
+        return self.engine_manager.set_current_engine(engine_name)
+
+    async def create_batch_tts_with_timecodes(self, items: List[Dict], 
+                                            rate: str, volume: str, pitch: str,
+                                            silence_duration_ms: int = 200, 
+                                            audio_format: str = "mp3",
+                                            use_concurrent: bool = True,
+                                            max_concurrent: Optional[int] = None) -> Dict[str, Any]:
+        """
+        批量合成TTS音频，不合并，返回各片段的时间码信息。
+        """
+        start_time = time.time()
+        original_items_count = len(items)
+        
+        # 1. 内容去重
+        # unique_items: list of unique item dicts
+        # dedup_map: dict where key is "text|voice|rate|volume|pitch" and value is list of original indices
+        unique_items, dedup_map = self._deduplicate_items(items)
+        items_to_synthesize_count = len(unique_items)
+        
+        print(f"⏱️ 开始批量TTS（带时间码）: {original_items_count} 个原始项目, {items_to_synthesize_count} 个唯一项目")
+
+        # 2. 合成唯一的音频片段
+        # synthesized_unique_audios: list of dicts {'path': str, 'item_detail': dict, 'duration': float (initially 0)}
+        # This list's order matches the order of unique_items
+        synthesized_unique_audios = []
+
+        if items_to_synthesize_count == 0: # 如果没有唯一项目（例如所有输入都是空文本）
+            print("⚠️ 没有有效的唯一项目进行合成。")
+        elif not use_concurrent or items_to_synthesize_count <= 3:
+            processing_mode = 'serial'
+            print(f"🔄 使用串行处理模式 (唯一项目数: {items_to_synthesize_count}, 格式: {audio_format})")
+            synthesized_paths = await self._batch_synthesize_serial(unique_items, rate, volume, pitch, audio_format)
+            for i, path in enumerate(synthesized_paths):
+                if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                    synthesized_unique_audios.append({'path': path, 'item_detail': unique_items[i], 'duration': 0.0})
+                else:
+                    print(f"⚠️ 串行合成的音频无效或为空: {path} (对应唯一项目索引 {i})")
+                    # 添加一个占位符，或记录错误，以便后续处理
+                    synthesized_unique_audios.append({'path': None, 'item_detail': unique_items[i], 'duration': 0.0, 'error': 'synthesis_failed_or_empty'})
+        else:
+            processing_mode = 'concurrent'
+            concurrent_limit = max_concurrent or TTS_CONFIG['max_concurrent_tasks']
+            print(f"⚡ 使用智能并发处理模式 (唯一项目数: {items_to_synthesize_count}, 并发数: {concurrent_limit}, 格式: {audio_format})")
+            # results: List[Tuple[str, Dict]] -> (temp_path, item_details_from_unique_items)
+            # The order of `results` corresponds to the order of `unique_items`
+            results = await self.batch_synthesize_concurrent(unique_items, rate, volume, pitch, concurrent_limit, audio_format)
+            for i, (path, item_detail) in enumerate(results): # item_detail is from unique_items
+                if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                    synthesized_unique_audios.append({'path': path, 'item_detail': item_detail, 'duration': 0.0})
+                else:
+                    print(f"⚠️ 并发合成的音频无效或为空: {path} (对应唯一项目索引 {i})")
+                    synthesized_unique_audios.append({'path': None, 'item_detail': item_detail, 'duration': 0.0, 'error': 'synthesis_failed_or_empty'})
+        
+        if not synthesized_unique_audios and items_to_synthesize_count > 0 : # 如果有尝试合成但列表为空
+             raise ValueError('所有唯一项目的音频合成均失败，无法进行时间码分析')
+        elif items_to_synthesize_count == 0: # 如果开始就没有唯一项目
+            pass # 继续执行，将返回空时间码等
+
+
+        # 3. 获取每个有效唯一音频片段的时长
+        valid_audio_paths_for_duration_analysis = [info['path'] for info in synthesized_unique_audios if info['path']]
+        
+        if valid_audio_paths_for_duration_analysis:
+            print(f"🔍 分析 {len(valid_audio_paths_for_duration_analysis)} 个唯一音频文件的时长...")
+            durations_sec = await self.audio_processor.get_audio_durations(valid_audio_paths_for_duration_analysis)
+            
+            # 将时长更新回 synthesized_unique_audios
+            duration_idx = 0
+            for info in synthesized_unique_audios:
+                if info['path']: # 只为有路径的文件更新时长
+                    if duration_idx < len(durations_sec):
+                        info['duration'] = durations_sec[duration_idx]
+                        print(f"   📄 音频: ...{info['path'][-20:]}, 时长: {info['duration']:.3f}s")
+                        duration_idx += 1
+                    else: # 不应发生，如果发生了说明 durations_sec 长度不够
+                        print(f"   ⚠️ 警告: 音频 {info['path']} 没有对应的时长信息。")
+                        info['duration'] = 0.0 # 或其他默认/错误标记
+
+        # 4. 根据去重映射和时长计算时间码
+        # `final_timecodes_ordered` will store dicts {text, original_index, start_time_ms, duration_ms, end_time_ms}
+        # in the order of the original `items`
+        final_timecodes_ordered = [None] * original_items_count
+        
+        # Create a map from unique_item's key to its info (path, duration)
+        # The key must be generated exactly as in _deduplicate_items
+        unique_item_key_to_info_map = {}
+        for i, unique_item_detail_dict in enumerate(synthesized_unique_audios):
+            # unique_item_detail_dict['item_detail'] is the item from unique_items
+            # unique_item_detail_dict['duration'] is its calculated duration
+            key = self._generate_item_key(unique_item_detail_dict['item_detail'], rate, volume, pitch)
+            unique_item_key_to_info_map[key] = {
+                'duration': unique_item_detail_dict['duration'], 
+                'path': unique_item_detail_dict['path'], # For reference or cleanup
+                'synthesized_item': unique_item_detail_dict['item_detail'] # The actual item that was synthesized
+            }
+
+        # Iterate through the original items' structure using dedup_map
+        for unique_key_from_dedup, original_indices_list in dedup_map.items():
+            # Get the synthesized info for this unique_key
+            synthesized_info = unique_item_key_to_info_map.get(unique_key_from_dedup)
+            
+            item_duration_sec = 0.0
+            if synthesized_info:
+                item_duration_sec = synthesized_info['duration']
+            else:
+                # This case implies a mismatch or an item that was in dedup_map but not synthesized
+                # (e.g., if all items were empty strings, unique_items would be empty)
+                # Or, if the key generation had subtle differences.
+                # _deduplicate_items filters out empty text items, so unique_items won't contain them.
+                # dedup_map's keys are based on non-empty text items.
+                print(f"⚠️ 警告: 在 'unique_item_key_to_info_map' 中未找到键 '{unique_key_from_dedup}'。")
+                print(f"    这可能表示该唯一项合成失败或键生成不一致。受影响的原始索引: {original_indices_list}")
+                # For items associated with this key, duration will be 0.
+            
+            item_duration_ms = item_duration_sec * 1000
+
+            for original_idx in original_indices_list:
+                original_item_text = items[original_idx].get('text', '')
+                # We don't use current_time_ms here yet, will calculate cumulative time later
+                timecode_entry = {
+                    'text': original_item_text,
+                    'original_index': original_idx,
+                    'duration_ms': round(item_duration_ms), 
+                    'synthesized_text': synthesized_info['synthesized_item'].get('text', '') if synthesized_info and synthesized_info.get('synthesized_item') else original_item_text, # Text actually sent for synthesis
+                    'voice_used': synthesized_info['synthesized_item'].get('voice') if synthesized_info and synthesized_info.get('synthesized_item') else items[original_idx].get('voice'),
+                }
+                final_timecodes_ordered[original_idx] = timecode_entry
+        
+        # Calculate cumulative start and end times including silence
+        actual_timecodes_with_silence = []
+        running_time_ms = 0.0
+        for i in range(original_items_count):
+            entry = final_timecodes_ordered[i]
+            if entry: # If it's a valid entry (not None)
+                entry['start_time_ms'] = round(running_time_ms)
+                entry['end_time_ms'] = round(running_time_ms + entry['duration_ms'])
+                actual_timecodes_with_silence.append(entry)
+                
+                running_time_ms += entry['duration_ms']
+                # Add silence if it's not the last actual item that will have audio
+                # Check if there's a next valid item to determine if silence is needed
+                is_last_valid_item = True
+                for k in range(i + 1, original_items_count):
+                    if final_timecodes_ordered[k] and final_timecodes_ordered[k]['duration_ms'] > 0:
+                        is_last_valid_item = False
+                        break
+                
+                if not is_last_valid_item and entry['duration_ms'] > 0 : # Add silence only if current has duration and is not the last one with duration
+                     running_time_ms += silence_duration_ms
+                elif not is_last_valid_item and entry['duration_ms'] == 0 and silence_duration_ms > 0: # if item has 0 duration but silence is configured
+                    # this means it's a placeholder, we might still add silence if it's not the absolute last item
+                    # This logic can be tricky: if many 0-duration items, do we add silence after each?
+                    # For now, only add silence after items that *had* audio or if explicitly handled.
+                    # Simplified: add silence if not the last entry in the final list.
+                    # Let's refine: Add silence if this item exists AND it's not the last *overall* item in the original list
+                    # AND there's another valid item coming up or silence_duration > 0
+                    # The previous check `is_last_valid_item` is better.
+                     pass
+
+
+            else: # Handle items that were not processed (e.g. original item was empty text and filtered out early)
+                # If you need placeholders for these in the timecode list:
+                # actual_timecodes_with_silence.append({
+                #     'text': items[i].get('text', ''), 
+                #     'original_index': i, 
+                #     'duration_ms': 0, 
+                #     'start_time_ms': round(running_time_ms), 
+                #     'end_time_ms': round(running_time_ms),
+                #     'error': 'item_skipped_or_empty'
+                # })
+                # If silence still needs to be added for consistency:
+                # if i < original_items_count - 1 and silence_duration_ms > 0:
+                #    running_time_ms += silence_duration_ms
+                pass
+
+
+        # 5. 清理临时唯一音频文件
+        paths_to_clean = [info['path'] for info in synthesized_unique_audios if info['path']]
+        if paths_to_clean:
+            print(f"🧹 清理 {len(paths_to_clean)} 个临时唯一音频文件...")
+            cleaned_count = 0
+            for path in paths_to_clean:
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                        cleaned_count += 1
+                except Exception as e:
+                    print(f"删除临时文件 {path} 失败: {e}")
+            print(f"   => 成功清理 {cleaned_count} 个文件。")
+
+        generation_time = time.time() - start_time
+        
+        return {
+            'success': True,
+            'timecodes': actual_timecodes_with_silence,
+            'total_duration_with_silence_ms': round(running_time_ms),
+            'items_processed_count': original_items_count,
+            'unique_items_synthesized_count': items_to_synthesize_count, # Number of unique items we attempted to synthesize
+            'actual_segments_with_audio_count': len([tc for tc in actual_timecodes_with_silence if tc['duration_ms'] > 0]),
+            'silence_between_items_ms': silence_duration_ms,
+            'generation_time_seconds': round(generation_time, 2),
+            'processing_mode': processing_mode,
+            'audio_format_generated': audio_format 
+        }
+
+    def _generate_item_key(self, item: Dict, default_rate: str, default_volume: str, default_pitch: str) -> str:
+        """辅助方法: 为TTS item生成与_deduplicate_items中一致的唯一键"""
+        text = item.get('text', '').strip()
+        
+        # 获取当前引擎的默认语音或全局默认语音
+        current_engine_config = self.engine_manager.get_current_engine().config if self.engine_manager.get_current_engine() else {}
+        # TTS_CONFIG['default_voice'] 作为最终备选
+        default_voice_from_engine = current_engine_config.get('default_voice')
+        if not default_voice_from_engine: # Fallback to global config if engine has no specific default
+            default_voice_from_engine = TTS_CONFIG.get('default_voice', 'zh-CN-XiaoxiaoNeural') # Fallback to a hardcoded general default
+
+        voice = item.get('voice', default_voice_from_engine)
+        rate_val = item.get('rate', default_rate) 
+        volume_val = item.get('volume', default_volume)
+        pitch_val = item.get('pitch', default_pitch)
+        return f"{text}|{voice}|{rate_val}|{volume_val}|{pitch_val}" 
