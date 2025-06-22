@@ -11,6 +11,7 @@ import asyncio
 import time
 from flask import Flask, render_template, request, send_from_directory, jsonify, Response, make_response
 from flask_cors import CORS
+import re
 
 # 导入重构后的模块
 from config import FLASK_CONFIG, CORS_CONFIG, TTS_CONFIG, LANGUAGE_NAMES, print_config_info
@@ -211,7 +212,7 @@ def api_batch_tts():
         default_audio_format = TTS_CONFIG.get('default_format', 'mp3') # 从配置获取默认格式
         items = data.get('items', [])
         # 默认输出文件名后缀应与默认格式一致
-        output_name_default = f'batch_tts_{{uuid.uuid4()}}.{default_audio_format}'
+        output_name_default = f'batch_tts_{uuid.uuid4().hex[:12]}.{default_audio_format}'
         output_name = data.get('output_name', output_name_default)
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
@@ -230,11 +231,20 @@ def api_batch_tts():
         if audio_format not in TTS_CONFIG['supported_formats']:
             return jsonify({'error': f'支持的音频格式: {", ".join(TTS_CONFIG["supported_formats"])}'}), 400
         
+        # 清理输出文件名，移除可能导致路径问题的字符
+        safe_output_name = re.sub(r'[^\w\-_.]', '_', output_name)
+        # 确保文件名不为空且有合适的扩展名
+        if not safe_output_name or safe_output_name.startswith('.'):
+            safe_output_name = f'batch_tts_{uuid.uuid4().hex[:8]}.{audio_format}'
+        
         # 根据格式调整输出文件扩展名
-        if audio_format == 'wav' and not output_name.endswith('.wav'):
-            output_name = output_name.replace('.mp3', '.wav') if output_name.endswith('.mp3') else output_name + '.wav'
-        elif audio_format == 'mp3' and not output_name.endswith('.mp3'):
-            output_name = output_name.replace('.wav', '.mp3') if output_name.endswith('.wav') else output_name + '.mp3'
+        if audio_format == 'wav' and not safe_output_name.endswith('.wav'):
+            safe_output_name = safe_output_name.replace('.mp3', '.wav') if safe_output_name.endswith('.mp3') else safe_output_name + '.wav'
+        elif audio_format == 'mp3' and not safe_output_name.endswith('.mp3'):
+            safe_output_name = safe_output_name.replace('.wav', '.mp3') if safe_output_name.endswith('.wav') else safe_output_name + '.mp3'
+        
+        print(f"📝 原始输出文件名: {output_name}")
+        print(f"🔧 安全输出文件名: {safe_output_name}")
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -242,20 +252,20 @@ def api_batch_tts():
         try:
             result = loop.run_until_complete(
                 tts_service.create_batch_audio(
-                    items, output_name, rate, volume, pitch,
+                    items, safe_output_name, rate, volume, pitch,
                     silence_duration, use_concurrent, max_concurrent, audio_format
                 )
             )
             
             # 构建下载URL
             host = request.host_url.rstrip('/')
-            download_url = f"{host}/static/audio/{output_name}"
+            download_url = f"{host}/static/audio/{safe_output_name}"
             
             # 返回与原API完全兼容的响应格式
             response_data = {
                 'success': True,
                 'download_url': download_url,
-                'filename': output_name,
+                'filename': safe_output_name,
                 'items_processed': result['items_processed'],
                 'audio_format': result['audio_format'],
                 'generation_time': result['generation_time'],

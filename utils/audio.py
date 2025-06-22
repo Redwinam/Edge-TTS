@@ -9,6 +9,7 @@ import time
 import asyncio
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
+import uuid
 
 
 class AudioProcessor:
@@ -49,6 +50,12 @@ class AudioProcessor:
             if not valid_files:
                 print("❌ 没有有效的音频文件")
                 return False
+            
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                print(f"📁 创建输出目录: {output_dir}")
             
             # 确定输出编码设置
             if audio_format.lower() == "wav":
@@ -212,6 +219,12 @@ class AudioProcessor:
                         if silence and i < len(file_paths) - 1:
                             combined += silence
                 
+                # 确保输出目录存在
+                output_dir = os.path.dirname(output_path)
+                if output_dir and not os.path.exists(output_dir):
+                    os.makedirs(output_dir, exist_ok=True)
+                    print(f"📁 创建输出目录: {output_dir}")
+                
                 combined.export(output_path, format=export_format, **export_params)
                 
             else:
@@ -219,37 +232,60 @@ class AudioProcessor:
                 chunks = [file_paths[i:i + chunk_size] for i in range(0, len(file_paths), chunk_size)]
                 chunk_files = []
                 
-                # 处理每个分块
-                for chunk_idx, chunk_paths in enumerate(chunks):
-                    chunk_combined = AudioSegment.empty()
-                    silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
-                    
-                    for i, file_path in enumerate(chunk_paths):
-                        if os.path.exists(file_path):
-                            audio = audio_loader(file_path)
-                            chunk_combined += audio
-                            if silence and i < len(chunk_paths) - 1:
-                                chunk_combined += silence
-                    
-                    # 保存临时分块文件
-                    chunk_file = f"{output_path}_chunk_{chunk_idx}.{export_format}"
-                    chunk_combined.export(chunk_file, format=export_format, **export_params)
-                    chunk_files.append(chunk_file)
+                # 使用临时目录存储chunk文件，避免路径中的非ASCII字符问题
+                temp_dir = tempfile.mkdtemp(prefix="tts_chunks_")
                 
-                # 合并所有分块
-                final_combined = AudioSegment.empty()
-                silence_between_chunks = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
-                
-                for i, chunk_file in enumerate(chunk_files):
-                    chunk_audio = audio_loader(chunk_file)
-                    final_combined += chunk_audio
-                    if silence_between_chunks and i < len(chunk_files) - 1:
-                        final_combined += silence_between_chunks
+                try:
+                    # 处理每个分块
+                    for chunk_idx, chunk_paths in enumerate(chunks):
+                        chunk_combined = AudioSegment.empty()
+                        silence = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
+                        
+                        for i, file_path in enumerate(chunk_paths):
+                            if os.path.exists(file_path):
+                                audio = audio_loader(file_path)
+                                chunk_combined += audio
+                                if silence and i < len(chunk_paths) - 1:
+                                    chunk_combined += silence
+                        
+                        # 保存临时分块文件到临时目录，使用安全的文件名
+                        chunk_filename = f"chunk_{chunk_idx}_{uuid.uuid4().hex[:8]}.{export_format}"
+                        chunk_file = os.path.join(temp_dir, chunk_filename)
+                        chunk_combined.export(chunk_file, format=export_format, **export_params)
+                        chunk_files.append(chunk_file)
                     
-                    # 删除临时文件
-                    os.remove(chunk_file)
-                
-                final_combined.export(output_path, format=export_format, **export_params)
+                    # 合并所有分块
+                    final_combined = AudioSegment.empty()
+                    silence_between_chunks = AudioSegment.silent(duration=silence_duration) if silence_duration > 0 else None
+                    
+                    for i, chunk_file in enumerate(chunk_files):
+                        chunk_audio = audio_loader(chunk_file)
+                        final_combined += chunk_audio
+                        if silence_between_chunks and i < len(chunk_files) - 1:
+                            final_combined += silence_between_chunks
+                    
+                    # 确保输出目录存在
+                    output_dir = os.path.dirname(output_path)
+                    if output_dir and not os.path.exists(output_dir):
+                        os.makedirs(output_dir, exist_ok=True)
+                        print(f"📁 创建输出目录: {output_dir}")
+                    
+                    final_combined.export(output_path, format=export_format, **export_params)
+                    
+                finally:
+                    # 清理临时文件和目录
+                    for chunk_file in chunk_files:
+                        try:
+                            if os.path.exists(chunk_file):
+                                os.remove(chunk_file)
+                        except Exception as e:
+                            print(f"⚠️ 清理临时chunk文件失败: {chunk_file}, 错误: {e}")
+                    
+                    try:
+                        if os.path.exists(temp_dir):
+                            os.rmdir(temp_dir)
+                    except Exception as e:
+                        print(f"⚠️ 清理临时目录失败: {temp_dir}, 错误: {e}")
             
             return True
             
