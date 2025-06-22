@@ -485,8 +485,9 @@ def serve_audio(filename):
 
 
 @app.route('/health', methods=['GET'])
+@app.route('/api/health', methods=['GET'])
 def health_check():
-    """健康检查端点"""
+    """健康检查端点（支持两个路径）"""
     engine_info = tts_service.get_current_engine_info()
     return jsonify({
         'status': 'healthy',
@@ -515,6 +516,7 @@ if __name__ == '__main__':
     print("   🏗️  模块化架构设计")
     print("   🌐 支持跨域访问 (CORS)")
     print("   🎵 支持MP3和WAV格式")
+    print("   🔒 支持HTTPS（可选）")
     print()
     
     # 显示当前引擎信息
@@ -523,10 +525,35 @@ if __name__ == '__main__':
     print(f"📊 可用引擎: {', '.join(engine_info.get('available_engines', []))}")
     print()
     
-    print(f"🌐 服务地址: http://localhost:{FLASK_CONFIG['port']}")
-    print(f"🎧 音频URL: http://localhost:{FLASK_CONFIG['port']}/static/audio/<filename>")
+    # 检查是否启用HTTPS
+    use_https = os.environ.get('TTS_HTTPS', 'false').lower() == 'true'
+    ssl_cert = os.environ.get('TTS_SSL_CERT', 'ssl/cert.pem')
+    ssl_key = os.environ.get('TTS_SSL_KEY', 'ssl/key.pem')
+    
+    if use_https and os.path.exists(ssl_cert) and os.path.exists(ssl_key):
+        protocol = "https"
+        ssl_context = (ssl_cert, ssl_key)
+        print(f"🔒 HTTPS服务地址: https://localhost:{FLASK_CONFIG['port']}")
+        print(f"🎧 音频URL: https://localhost:{FLASK_CONFIG['port']}/static/audio/<filename>")
+        print(f"🛡️  SSL证书: {ssl_cert}")
+    else:
+        protocol = "http"
+        ssl_context = None
+        print(f"🌐 HTTP服务地址: http://localhost:{FLASK_CONFIG['port']}")
+        print(f"🎧 音频URL: http://localhost:{FLASK_CONFIG['port']}/static/audio/<filename>")
+        if use_https:
+            print("⚠️  HTTPS已启用但SSL证书文件不存在，回退到HTTP模式")
+    
+    print("=" * 60)
+    print("💡 HTTPS启用方法:")
+    print("   1. 设置环境变量: export TTS_HTTPS=true")
+    print("   2. 提供SSL证书: ssl/cert.pem 和 ssl/key.pem")
+    print("   3. 或自定义证书路径:")
+    print("      export TTS_SSL_CERT=/path/to/cert.pem")
+    print("      export TTS_SSL_KEY=/path/to/key.pem")
     print("=" * 60)
     
     app.run(debug=FLASK_CONFIG['debug'], 
             host=FLASK_CONFIG['host'], 
-            port=FLASK_CONFIG['port']) 
+            port=FLASK_CONFIG['port'],
+            ssl_context=ssl_context) 
