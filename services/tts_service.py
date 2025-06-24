@@ -302,7 +302,7 @@ class TTSService:
 
     async def create_batch_audio(self, items: List[Dict], output_name: str, 
                                rate: str, volume: str, pitch: str,
-                               silence_duration: int = 200, 
+                               silence_duration: int = 0, 
                                use_concurrent: bool = True,
                                max_concurrent: Optional[int] = None,
                                audio_format: str = "mp3") -> Dict[str, Any]:
@@ -427,7 +427,7 @@ class TTSService:
 
     async def create_batch_tts_with_timecodes(self, items: List[Dict], 
                                             rate: str, volume: str, pitch: str,
-                                            silence_duration_ms: int = 200, 
+                                            silence_duration_ms: int = 0, 
                                             audio_format: str = "mp3",
                                             use_concurrent: bool = True,
                                             max_concurrent: Optional[int] = None) -> Dict[str, Any]:

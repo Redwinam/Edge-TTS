@@ -29,7 +29,7 @@ class AudioProcessor:
             return False
     
     async def combine_audio_files(self, file_paths: List[str], output_path: str, 
-                                silence_duration: int = 200, 
+                                silence_duration: int = 0, 
                                 audio_format: str = "wav") -> bool:
         """合并音频文件"""
         if self.ffmpeg_available:

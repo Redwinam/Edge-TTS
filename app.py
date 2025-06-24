@@ -217,7 +217,7 @@ def api_batch_tts():
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
-        silence_duration = data.get('silence_duration', 200)
+        silence_duration = data.get('silence_duration', 0)
         audio_format = data.get('audio_format', default_audio_format).lower()
         
         # 智能模式参数
@@ -329,7 +329,7 @@ def api_batch_tts_with_timecodes():
         rate = data.get('rate', '+0%')
         volume = data.get('volume', '+0%')
         pitch = data.get('pitch', '+0Hz')
-        silence_duration_ms = data.get('silence_duration_ms', data.get('silence_duration', 200)) # 支持旧的silence_duration
+        silence_duration_ms = data.get('silence_duration_ms', data.get('silence_duration', 0)) # 支持旧的silence_duration
         use_concurrent = data.get('use_concurrent', True)
         max_concurrent_from_req = data.get('max_concurrent')
         audio_format = data.get('audio_format', default_audio_format).lower()
