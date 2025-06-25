@@ -1,43 +1,32 @@
-# TTS 服务项目
+# TTS 智能语音合成服务
 
-🎵 智能语音合成服务，支持 Azure TTS 和 Edge TTS
+🎵 支持 Azure TTS 和 Edge TTS 的智能语音合成服务，采用模块化架构设计
 
 ## 🚀 快速开始
 
-**推荐使用重构版 v3.0：**
-
 ```bash
 # 安装依赖
-pip install -r requirements_new.txt
+pip install -r requirements.txt
 
 # 启动服务
 python start_new.py
 ```
 
-详细文档请查看：[README_NEW.md](README_NEW.md)
+服务将在 `http://localhost:5020` 启动
 
 ## 📁 项目结构
 
-### 新版本文件（推荐使用）
-
-- `app.py` - 重构版主应用
-- `start_new.py` - 新版启动脚本
-- `requirements_new.txt` - 新版依赖
-- `README_NEW.md` - 详细使用文档
-- `config/` - 配置模块
-- `engines/` - TTS 引擎模块
-- `services/` - 服务层
-- `utils/` - 工具模块
-
-### 实用工具
-
-- `install_ffmpeg.py` - FFmpeg 安装助手（可选，用于音频处理加速）
-
-### 遗留文件（保持兼容性）
-
-- `requirements.txt` - 原版依赖
-- `templates/` - 前端模板
-- `static/` - 静态文件
+```
+├── app.py                 # 主应用文件
+├── start_new.py          # 启动脚本
+├── requirements.txt      # 依赖列表
+├── config/               # 配置模块
+├── engines/              # TTS引擎模块
+├── services/             # 服务层
+├── utils/                # 工具模块
+├── templates/            # 前端模板
+└── static/audio/         # 音频输出目录
+```
 
 ## ✨ 主要特性
 
@@ -59,30 +48,38 @@ export AZURE_SPEECH_KEY="your_azure_key"
 export AZURE_SPEECH_REGION="eastasia"
 ```
 
-## 📖 文档
+## 🔌 API 接口
 
-- [完整使用文档](README_NEW.md)
-- [API 接口说明](README_NEW.md#api-接口)
-- [内容去重功能](README_DEDUPLICATION.md)
-- [故障排除指南](README_NEW.md#故障排除)
+### 单个 TTS 合成
 
-## 🆕 更新日志
+```bash
+curl -X POST http://localhost:5020/api/tts \
+  -H "Content-Type: application/json" \
+  -d '{"text": "你好世界", "voice": "zh-CN-XiaoxiaoNeural"}'
+```
 
-**v3.1 (去重优化版)**
+### 批量 TTS 合成
 
-- ✅ 新增智能内容去重功能
-- ✅ 自动检测重复 TTS 内容，减少重复合成
-- ✅ 提供详细的去重效率统计
-- ✅ 保持音频序列的完整性和顺序
+```bash
+curl -X POST http://localhost:5020/api/batch_tts \
+  -H "Content-Type: application/json" \
+  -d '{"items": [{"text": "第一段"}, {"text": "第二段"}]}'
+```
 
-**v3.0 (重构版)**
+### 获取可用语音
 
-- ✅ 完全重构，模块化设计
-- ✅ Azure TTS 作为默认引擎
-- ✅ 自动故障转移
-- ✅ 智能缓存和并发处理
-- ✅ 目录自动创建
-- ✅ 清理旧文件，项目结构更简洁
+```bash
+curl http://localhost:5020/api/voices
+```
+
+## 🚀 高级功能
+
+- **智能并发处理** - 自动选择最优处理模式
+- **自动故障转移** - Azure TTS 失败时切换到 Edge TTS
+- **智能缓存系统** - 基于内容的缓存机制
+- **FFmpeg 优化** - 支持超高性能音频合并
+- **多格式支持** - MP3 和 WAV 格式输出
+- **实时引擎切换** - 运行时动态切换 TTS 引擎
 
 ## �� 许可证
 

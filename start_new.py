@@ -48,7 +48,7 @@ def check_dependencies():
             print("✅ 依赖安装完成")
         except subprocess.CalledProcessError as e:
             print(f"❌ 依赖安装失败: {e}")
-            print("请手动安装：pip install " + " ".join(missing_deps))
+            print("请手动安装：pip install -r requirements.txt")
             return False
     
     return True
@@ -111,7 +111,7 @@ def start_server():
         from config import FLASK_CONFIG
         
         print("\n" + "=" * 60)
-        print("🎵 TTS 智能服务 v3.0 (重构版)")
+        print("🎵 TTS 智能服务 v3.1 (去重优化版)")
         print("=" * 60)
         print("✨ 特性:")
         print("   🔵 默认使用Azure TTS")
@@ -120,6 +120,7 @@ def start_server():
         print("   ⚡ 智能并发处理")
         print("   🎯 自动故障转移")
         print("   💾 智能缓存系统")
+        print("   🔄 智能内容去重")
         print("   🏗️  模块化架构设计")
         print("   🌐 支持跨域访问 (CORS)")
         print("   🎵 支持MP3和WAV格式")
